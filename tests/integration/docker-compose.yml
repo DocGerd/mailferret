@@ -1,4 +1,5 @@
-# Integration harness; the tests create the certs and set CERTS_DIR (see conftest.py).
+# Integration harness; the defaults only let `down -v` run without env; the tests create the certs and set CERTS_DIR (see conftest.py).
+name: mailferret-it
 services:
   greenmail:
     # Version vetted in docs/research/v2-greenmail.md; the digest pins the exact image.
@@ -10,10 +11,10 @@ services:
         -Dgreenmail.users=alice:pw-a@example.com,bob:pw-b@example.com
         -Dgreenmail.users.login=email
         -Dgreenmail.tls.keystore.file=/certs/greenmail.p12
-        -Dgreenmail.tls.keystore.password=${KEYSTORE_PASSWORD:?set by the test harness}
-        -Dgreenmail.tls.key.password=${KEYSTORE_PASSWORD:?set by the test harness}
+        -Dgreenmail.tls.keystore.password=${KEYSTORE_PASSWORD:-}
+        -Dgreenmail.tls.key.password=${KEYSTORE_PASSWORD:-}
     ports:
       - "127.0.0.1:3143:3143"
       - "127.0.0.1:3993:3993"
     volumes:
-      - "${CERTS_DIR:?set by the test harness}:/certs:ro"
+      - "${CERTS_DIR:-./certs}:/certs:ro"
