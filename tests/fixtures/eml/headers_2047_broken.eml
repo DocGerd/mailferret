@@ -1,0 +1,12 @@
+From: Alice <user@example.com>
+To: Bob <bob@example.com>
+Date: Mon, 01 Jan 2024 10:00:00 +0000
+Message-ID: <h2047b@example.com>
+Subject: =?UTF-8?Q?Gr=C3=BC=C3=9Fe?=
+Subject: duplicate subject
+X-Broken: =?UTF-8?Q?unterminated
+X-Dup: one
+X-Dup: two
+Content-Type: text/plain; charset=utf-8
+
+Body.

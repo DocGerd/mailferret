@@ -1,0 +1,11 @@
+From: Alice <user@example.com>
+To: Bob <bob@example.com>, Shop <orders@shop.example.com>
+Cc: Promo <promo+spring@alias.example.com>
+Date: Mon, 01 Jan 2024 10:00:00 +0000
+Message-ID: <alias2@example.com>
+Delivered-To: anything-7f3a@alias.example.com
+X-Original-To: sales+promo@shop.example.com
+Envelope-To: bob@example.com
+Content-Type: text/plain
+
+Body.

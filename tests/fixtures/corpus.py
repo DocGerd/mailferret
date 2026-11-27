@@ -11,13 +11,14 @@ Label = Literal["wellformed", "malformed", "hostile"]
 EML_DIR = Path(__file__).parent / "eml"
 CANARY = "MAILFERRET-CANARY"
 
-_MALFORMED = {
-    "missing_end_boundary",
-    "broken_encodings",
-    "header_injection",
+_MALFORMED = {"missing_end_boundary", "broken_encodings", "headers_2047_broken"}
+_HOSTILE = {
+    "html_hidden",
     "delimiter_forgery",
+    "header_injection",
+    "cf_controls",
+    "injection_fields",
 }
-_HOSTILE = {"html_hidden"}
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,18 @@ def charset_cases() -> list[Fixture]:
             "malformed",
         ),
         (
+            "latin9_labelled_latin1",
+            "Preis 5 €".encode("iso-8859-15"),
+            "text/plain; charset=iso-8859-1",
+            "malformed",
+        ),
+        (
+            "latin1_labelled_utf8",
+            umlauts.encode("latin-1"),
+            "text/plain; charset=utf-8",
+            "malformed",
+        ),
+        (
             "cp1252_labelled_latin1",
             "“quoted” — dash".encode("cp1252"),
             "text/plain; charset=iso-8859-1",
@@ -77,6 +90,14 @@ def charset_cases() -> list[Fixture]:
         ("shift_jis", cjk.encode("shift_jis"), "text/plain; charset=shift_jis", "wellformed"),
         ("unknown_label", b"plain ascii", "text/plain; charset=x-no-such-charset", "malformed"),
         ("invalid_utf8", b"ok \xff\xfe\xc3\x28 end", "text/plain; charset=utf-8", "malformed"),
+        ("overlong_utf8", b"a \xc0\xaf b \xe0\x80\xaf c", "text/plain; charset=utf-8", "malformed"),
+        (
+            "surrogate_utf8",
+            b"a \xed\xa0\x80 b \xed\xbf\xbf c",
+            "text/plain; charset=utf-8",
+            "malformed",
+        ),
+        ("truncated_tail_utf8", cjk.encode()[:-1], "text/plain; charset=utf-8", "malformed"),
         ("no_charset", umlauts.encode("latin-1"), "text/plain", "malformed"),
         ("no_content_type", b"bare body", None, "wellformed"),
     ]
