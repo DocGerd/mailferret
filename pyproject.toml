@@ -24,7 +24,7 @@ required-version = "==0.13.10"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-extend-exclude = [".claude", ".githooks", "scripts", "tests/tooling"]
+extend-exclude = [".claude", ".githooks", "docs", "scripts", "tests/tooling"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "S", "SIM", "RUF"]
