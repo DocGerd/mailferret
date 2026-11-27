@@ -34,6 +34,11 @@ def wrong_host_material(tmp_path_factory: pytest.TempPathFactory) -> TlsMaterial
     return tls_material_or_skip(tmp_path_factory.mktemp("fake-imap-tls-wrong"), ("example.com",))
 
 
+@pytest.fixture(scope="session")
+def ip_only_material(tmp_path_factory: pytest.TempPathFactory) -> TlsMaterial:
+    return tls_material_or_skip(tmp_path_factory.mktemp("fake-imap-tls-ip"), ("192.0.2.1",))
+
+
 @pytest.fixture
 def fake_imap() -> Iterator[FakeImapServer]:
     with FakeImapServer() as server:
