@@ -70,6 +70,7 @@ class Guard(RepoCase):
 
     def test_clean_commit_passes(self) -> None:
         self.assertEqual(self.guard('git commit -m "fix: thing; more"'), 0)
+        self.assertEqual(self.guard("git log --oneline -3 2>&1 | tail -1"), 0)
         self.assertEqual(self.guard("git status && git log --oneline -3"), 0)
 
     def test_cd_into_worktree_before_commit(self) -> None:
@@ -116,8 +117,12 @@ class Guard(RepoCase):
                         'echo "git commit" | sh', 'c="git commit"; eval "$c"', 'git log "$(git commit -m y)"',
                         "git log --format=`git commit -m y`", 'git commit -F "$(cat m)"',
                         "cd /tmp || git commit -m x", "cd x; git commit -m x", "git status && cd x && git commit -m x",
-                        "cat <<'EOF'\ngit commit -m x\nEOF", "env FOO=1 make && git commit -m x",
-                        "git commit -m 'unterminated", "git log | head", "GIT_DIR=x git status"):
+                        "env FOO=1 make && git commit -m x",
+                        "git commit -m 'unterminated", "g''it commit -m x", "\\git commit -m x", "gi\\t status",
+                        "git commit -F - <<EOF\nfix\nEOF", "git commit -F - <<'EOF'\nfix\n",
+                        'git commit -m "$(echo fix)"', "git commit -m \"$(cat <<EOF\nfix\nEOF\n)\"",
+                        'git commit -m "$(cat msg)"', "git commit -m `cat msg`", "ls; echo `g''it commit -m x`",
+                        "xargs -a f git status", 'G=git; $G commit -m x', 'sh -c "$CMD"', "echo 'commit -m x' | xargs git"):
             with self.subTest(command=command):
                 self.assert_blocked_naming(command, NOT_PLAIN)
 
@@ -129,6 +134,17 @@ class Guard(RepoCase):
                         "git status\ngit commit -m x", "git commit -m x; git log -1 || true", f"cd {wt} && git commit -m x",
                         'grep -n "git commit" README.md', 'echo "git merge done" && git commit -m x', "FOO=1 make",
                         "ls | head"):
+            with self.subTest(command=command):
+                self.assertEqual(self.guard(command), 0, self.stderr)
+
+    def test_commands_that_cannot_commit_pass(self) -> None:
+        for command in ("git log | head", "git status > out.txt", "git diff 2>&1", "git log -1 2>&1 | tail -1",
+                        "grep -n git README.md", 'grep -rn "git commit" README.md | head', "GIT_DIR=x git status", "export GIT_DIR=x; git log -1",
+                        "git branch --list | grep main", "git show HEAD@{1} | head", "cd /tmp; git status | head",
+                        "gh pr create --title t --body \"$(cat <<'EOF'\nSee git log.\nEOF\n)\"",
+                        "cat <<'EOF'\ngit commit -m x\nEOF", "git log $(git rev-parse HEAD) | head",
+                        "find . -path ./.git -prune -o -name '*.py' -print", "bash script.sh", "echo $(date)",
+                        "git status # note"):
             with self.subTest(command=command):
                 self.assertEqual(self.guard(command), 0, self.stderr)
 

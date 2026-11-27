@@ -5,14 +5,19 @@
   commit_guard.py tests  block (exit 2) if `uv run pytest -q -x` fails; skipped without pyproject.toml
   commit_guard.py all    both, PII first
 
-A command that mentions git must be plain, or it blocks: git (with only -C <path>
-or --no-pager before the subcommand) and simple commands, joined only by &&, ;,
-|| or newlines, with no redirect but a `git commit -F -` heredoc. Assignments,
-shell builtins and keywords, interpreters and wrappers, a git or shell word
-under another command, $(...), backticks, comments, unknown git
-subcommands and expansions before the subcommand are not plain; cd/pushd may
-only come first, followed by &&. A commit's message arguments are exempt, and
-other expansions in its arguments, or a commit only named inside an argument,
+A command that could commit must be plain, or it blocks. It could commit when
+git runs a subcommand that is not known to be read-only, a git word is followed
+by a committing subcommand under another command, a git word is obfuscated with
+quotes or backslashes, a command runner (eval, env, xargs, sh, ...) sees git or
+an expansion, an expanded command name may be git, a $(...) or backtick body
+could commit, or the text cannot be parsed. Plain is git (with only -C <path> or
+--no-pager before the subcommand) and simple commands, joined only by &&, ;, ||
+or newlines, with no redirect but a quoted `git commit -F -` heredoc.
+Assignments, shell builtins and keywords, runners, a git or shell word under
+another command, comments, unknown git subcommands, expansions before the
+subcommand, and $(...) or backticks other than a `$(cat <<'EOF' ... EOF)`
+message are not plain; cd/pushd may only come first, followed by &&. Other
+expansions in a commit's arguments, or a commit only named inside an argument,
 make it scanned in full. This is best-effort: the .githooks pre-commit hook and
 CI enforce. A commit is checked when its target shares this project's git
 common dir (any linked worktree, wherever it lives); other repositories are left
@@ -86,8 +91,10 @@ NON_COMMITTING = {
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 # Commands that run their arguments as commands; not a closed set.
 RUNNERS = {"env", "sudo", "doas", "su", "xargs", "nohup", "timeout", "nice", "stdbuf", "setsid", "flock", "watch",
-           "script", "ssh", "parallel", "find", "python", "python3", "perl", "ruby", "node", "awk", *SHELLS}
+           "script", "ssh", "parallel", "python", "python3", "perl", "ruby", "node", "awk", *SHELLS}
 UNSAFE_HEADS = SHELL_WORDS - SAFE_BUILTINS | RUNNERS
+EXECUTORS = RUNNERS | {"eval", "exec", "command", "builtin", "source", "."}
+CAT_HEREDOC = re.compile(r"\$\(cat <<-?'[A-Za-z_]\w*'\s*\)")
 COULD_COMMIT = re.compile(r"\bgit\b|[$`]|\b(?:" + "|".join(map(re.escape, COMMIT_LIKE)) + r")\b")
 HEREDOC = re.compile(r"(<<-?[ \t]*(['\"]?)([A-Za-z_]\w*)\2[^\n]*)\n(?:(.*?)\n)?[ \t]*\3[ \t]*(?=\n|$)", re.S)
 
@@ -103,7 +110,8 @@ class Commit:
     worktree: bool = False  # -a/--all/pathspecs/--include/--only: unstaged changes get committed
     adds: bool = False  # git add/rm/mv in the same command
     all_worktrees: bool = False  # the target directory cannot be known: scan every worktree
-    plain: bool = True  # see the module docstring; a detected commit in a non-plain command blocks
+    risky: bool = False  # the command could commit, so it must be plain (see the module docstring)
+    plain: bool = True
     dirs: list[Path] = field(default_factory=list)
     force_paths: list[Path] = field(default_factory=list)  # `git add -f` pathspecs, absolute
     messages: list[str] = field(default_factory=list)
@@ -129,33 +137,40 @@ def runs_code(token: str) -> bool:
 
 @dataclass
 class Segment:
-    words: list[str]
+    words: list[str] = field(default_factory=list)
+    raws: list[str] = field(default_factory=list)  # each word as written, before quote and escape removal
     redirects: list[str] = field(default_factory=list)  # also any operator other than &&, ;, || and newline
     joiner: str = ""  # the operator after it
+    quoted_heredoc: bool = False
 
 
 def segments(text: str) -> list[Segment] | None:
     lex = shlex.shlex(text, posix=True, punctuation_chars=PUNCT)
     lex.whitespace, lex.whitespace_split, lex.commenters = " \t\r", True, ""
+    out, start, skip, heredoc = [Segment()], 0, False, False
     try:
-        tokens = list(lex)
+        while (tok := lex.get_token()) != lex.eof:
+            end = lex.instream.tell() - len(lex._pushback_chars)
+            raw, start = text[start:end].strip(" \t\r"), end
+            if tok and raw == tok and all(c in PUNCT for c in tok):
+                joiner = tok.replace("\n", "")
+                redirect = ("<" in tok or ">" in tok) and "(" not in tok and ")" not in tok
+                if joiner not in ("", "&&", ";", "||"):
+                    out[-1].redirects.append(tok)  # any other operator: not plain
+                if not redirect or tok[0] in ";&|\n":
+                    out[-1].joiner = joiner or ";"
+                    out.append(Segment())
+                skip = redirect  # the target or heredoc delimiter
+                heredoc = tok.endswith("<<")
+            elif skip:
+                skip = False
+                if heredoc:
+                    out[-1].quoted_heredoc = raw.lstrip("-")[:1] in ("'", '"')
+            else:
+                out[-1].words.append(tok)
+                out[-1].raws.append(raw)
     except ValueError:
         return None
-    out = [Segment([])]
-    heredoc = False
-    for tok in tokens:
-        if heredoc:
-            heredoc = False  # the delimiter
-        elif tok and all(c in PUNCT for c in tok):
-            joiner = tok.replace("\n", "")
-            if joiner in ("", "&&", ";", "||"):
-                out[-1].joiner = joiner or ";"
-                out.append(Segment([]))
-            else:
-                out[-1].redirects.append(tok)
-                heredoc = tok == "<<"
-        else:
-            out[-1].words.append(tok)
     return [seg for seg in out if seg.words or seg.redirects]
 
 
@@ -237,7 +252,7 @@ def _git_segment(tokens: list[str], cur: Path, result: Commit, heredoc: bool) ->
                 result.force_paths.append(target if bad else target / spec)
     before = len(result.messages)
     if sub and sub not in NON_COMMITTING:
-        result.detected = True
+        result.detected = result.risky = True
         result.dirs.append(target)
         if sub not in COMMIT_LIKE:  # an alias or a command-running subcommand
             result.plain, result.ambiguous = False, True
@@ -246,12 +261,19 @@ def _git_segment(tokens: list[str], cur: Path, result: Commit, heredoc: bool) ->
         if sub in ("commit", "merge"):
             _commit_args(rest, target, result, sub)
     exempt = result.messages[before:]
-    if any(runs_code(t) and t not in exempt for t in rest) or (heredoc and "\0stdin" not in exempt):
+    if (any(runs_code(t) and not (t in exempt and (t.startswith("#") or CAT_HEREDOC.fullmatch(t))) for t in rest)
+            or (heredoc and "\0stdin" not in exempt)):
         result.plain = False
 
 
-def _word_segment(words: list[str], cur: Path, result: Commit) -> None:
+def _word_segment(words: list[str], cur: Path, result: Commit, dequoted: str) -> None:
     head = words[0]
+    gits = [i for i, t in enumerate(words) if Path(t).name in GIT_NAMES]
+    runs_command = head in EXECUTORS or any(Path(t).name in SHELLS for t in words)
+    if ((gits and any(t in COMMIT_LIKE for t in words[gits[0] + 1 :]))
+            or (runs_command and (re.search(r"\bgit\b", dequoted) or any(expands(t) for t in words[1:])))
+            or (expands(head) and re.search("git", dequoted, re.I))):
+        result.risky = True
     if (ASSIGNMENT.match(head) or head in UNSAFE_HEADS
             or any(expands(t) or runs_code(t) or Path(t).name in (*GIT_NAMES, *SHELLS) for t in words)):
         result.plain = False
@@ -270,10 +292,17 @@ def _cd(words: list[str], cur: Path, result: Commit) -> Path:
     return cur / os.path.expanduser(args[0]) if args else Path.home()
 
 
+def _substitutions_could_commit(words: list[str], cwd: Path) -> bool:
+    """Words split inside an unquoted $(...) or backticks, so the segment is re-read as commands."""
+    words = [w for w in words if not CAT_HEREDOC.fullmatch(w)]
+    if not any("$(" in w or "`" in w for w in words):
+        return False
+    body = analyse(re.sub(r"\$\(|[`)]", " ; ", " ".join(words)), cwd)
+    return body.risky or body.detected
+
+
 def analyse(command: str, cwd: Path) -> Commit:
     result = Commit()
-    if re.search(r"\bgit\b", command) is None:
-        return result
     bodies: list[str] = []
 
     def keep_header(m: re.Match[str]) -> str:
@@ -281,16 +310,30 @@ def analyse(command: str, cwd: Path) -> Commit:
         return m.group(1)
 
     text = HEREDOC.sub(keep_header, command).replace("\\\n", " ")  # line continuations
+    dequoted = re.sub(r"[\"'\\]", "", command)
     segs = segments(text)
     if segs is None:
-        result.plain = False
+        result.risky, result.plain = True, False
         segs = []
+    elif len(bodies) != sum(seg.redirects.count("<<") + sum(bool(CAT_HEREDOC.fullmatch(w)) for w in seg.words)
+                            for seg in segs):
+        result.plain = False  # a heredoc the guard could not cut out
     cur = cwd
     for i, seg in enumerate(segs):
-        heredoc = seg.redirects == ["<<"]
+        heredoc = seg.redirects == ["<<"] and seg.quoted_heredoc
+        if any(raw != w and (Path(w).name in GIT_NAMES or w in UNSAFE_HEADS)
+               for w, raw in zip(seg.words, seg.raws)):
+            result.risky, result.plain = True, False  # quotes or escapes hide what runs
+        comment = next((j for j, raw in enumerate(seg.raws) if raw.startswith("#")), None)
+        if comment is not None and re.search(r"\bgit\b", " ".join(seg.words[comment:])):
+            result.risky, result.plain = True, False  # a joined line continuation after a comment
+        if _substitutions_could_commit(seg.words, cur):
+            result.risky = True
         if not seg.words or (seg.redirects and not heredoc):
             result.plain = False
-        elif seg.words[0] in ("cd", "pushd"):
+        if not seg.words:
+            continue
+        if seg.words[0] in ("cd", "pushd"):
             if i or seg.joiner != "&&" or heredoc or any(expands(t) or runs_code(t) for t in seg.words):
                 result.plain = False
             cur = _cd(seg.words, cur, result)
@@ -299,10 +342,11 @@ def analyse(command: str, cwd: Path) -> Commit:
         else:
             if heredoc:
                 result.plain = False
-            _word_segment(seg.words, cur, result)
-    if not result.plain:
+            _word_segment(seg.words, cur, result, dequoted)
+    if result.risky:
         result.detected = True
-        result.dirs.append(cwd)
+        if not result.plain:
+            result.dirs.append(cwd)
     if result.detected:
         result.messages.extend(bodies)
         if "\0stdin" in result.messages:
@@ -417,7 +461,7 @@ def main(mode: str, payload: dict) -> int:
         inherited = sorted(k for k in os.environ if redirecting(k))
         if inherited:
             raise Blocked(f"Commit blocked: inherited {', '.join(inherited)} would redirect the commit; unset it.")
-        if not commit.plain:
+        if commit.risky and not commit.plain:
             raise Blocked(NOT_PLAIN)
         own = repo_of(project)
         if own is None:
