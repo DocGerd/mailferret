@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -13,14 +15,18 @@ ENV_LINE = "IMAP_PASS" + "WORD=" + "s3cr3t" + "Value9"
 
 
 class Guard(RepoCase):
-    def guard(self, command: str, cwd: Path | None = None, raw: str | None = None,
-              env: dict[str, str] | None = None) -> int:
+    def guard_run(self, command: str, cwd: Path | None = None, raw: str | None = None,
+                  env: dict[str, str] | None = None, mode: str = "pii") -> subprocess.CompletedProcess[str]:
         payload = raw if raw is not None else json.dumps(
             {"tool_input": {"command": command}, "cwd": str(cwd or self.repo)})
-        res = run(["python3", str(GUARD), "pii"], self.repo, stdin=payload,
+        res = run(["python3", str(GUARD), mode], self.repo, stdin=payload,
                   env={**ENV, "CLAUDE_PROJECT_DIR": str(self.repo), **(env or {})})
         self.assertNotIn(EMAIL, res.stderr)
-        return res.returncode
+        return res
+
+    def guard(self, command: str, cwd: Path | None = None, raw: str | None = None,
+              env: dict[str, str] | None = None) -> int:
+        return self.guard_run(command, cwd, raw, env).returncode
 
     def stage_hit(self, root: Path) -> None:
         self.write("leak.txt", f"{EMAIL}\n", root=root)
@@ -56,11 +62,33 @@ class Guard(RepoCase):
         other = self.tmp / "other"
         other.mkdir()
         git(other, "init", "-q")
-        redirect = {"GIT_DIR": str(other / ".git"), "GIT_INDEX_FILE": str(other / ".git" / "index")}
-        self.assertEqual(self.guard("git commit -m x", env=redirect), 2)
-        self.assertEqual(self.guard("git status", env=redirect), 0)
-        injected = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.worktree", "GIT_CONFIG_VALUE_0": str(other)}
-        self.assertEqual(self.guard("git commit -a -m x", env=injected), 2)
+        cases = {
+            "GIT_DIR": {"GIT_DIR": str(other / ".git")},
+            "GIT_INDEX_FILE": {"GIT_INDEX_FILE": str(other / ".git" / "index")},
+            "GIT_CONFIG_PARAMETERS": {"GIT_CONFIG_PARAMETERS": f"'core.worktree={other}'"},
+            "GIT_CONFIG_COUNT": {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.worktree",
+                                 "GIT_CONFIG_VALUE_0": str(other)},
+            "GIT_CEILING_DIRECTORIES": {"GIT_CEILING_DIRECTORIES": str(self.tmp)},
+            "GIT_DISCOVERY_ACROSS_FILESYSTEM": {"GIT_DISCOVERY_ACROSS_FILESYSTEM": str(other)},
+        }
+        for name, env in cases.items():
+            with self.subTest(name=name):
+                res = self.guard_run("git commit -a -m x", env=env)
+                self.assertEqual(res.returncode, 2)
+                self.assertIn(name, res.stderr)
+                self.assertNotIn(str(self.tmp), res.stderr)
+                self.assertEqual(self.guard("git status", env=env), 0)
+
+    def test_tests_mode_runs_pytest_without_git_env(self) -> None:
+        self.write("pyproject.toml", "")
+        stub = self.write("bin/uv", '#!/bin/sh\nenv > "$UV_ENV_OUT"\n', root=self.tmp)
+        stub.chmod(0o755)
+        out = self.tmp / "uv-env"
+        env = {"PATH": f"{stub.parent}{os.pathsep}{ENV['PATH']}", "UV_ENV_OUT": str(out), "GIT_PREFIX": "sub/"}
+        res = self.guard_run("git commit -m x", env=env, mode="tests")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertTrue(out.exists())
+        self.assertEqual([line for line in out.read_text().splitlines() if line.startswith("GIT_")], [])
 
     def test_force_added_ignored_file(self) -> None:
         self.write(".env", ENV_LINE + "\n")

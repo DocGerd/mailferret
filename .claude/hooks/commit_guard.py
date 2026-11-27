@@ -32,9 +32,10 @@ DEADLINE = time.monotonic() + 540
 PYTEST_CAP_S = 420
 # Inherited, these give the commit another repo, index or config than the guard resolves: a commit then blocks.
 REDIRECTING_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
-                   "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT")
-SCRUBBED_ENV = (*REDIRECTING_ENV, "GIT_PREFIX", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-                "GIT_CONFIG")
+                   "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+                   "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM")
+# The guard's own git and scanner runs drop these; anything in REDIRECTING_ENV has blocked before they start.
+SCRUBBED_ENV = ("GIT_PREFIX", "GIT_CONFIG")
 
 PUNCT = ";&|()<>\n"
 GIT_OPTS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env",
