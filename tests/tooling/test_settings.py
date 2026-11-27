@@ -11,7 +11,7 @@ import json
 import re
 import unittest
 
-from support import GUARD, REPO
+from .support import GUARD, REPO
 
 SETTINGS = json.loads((REPO / ".claude" / "settings.json").read_text())
 PERMS = SETTINGS["permissions"]
@@ -39,7 +39,9 @@ class Settings(unittest.TestCase):
     def test_guard_blocks_on_failure_within_budget(self) -> None:
         (entry,) = [h for group in SETTINGS["hooks"]["PreToolUse"] for h in group["hooks"]]
         self.assertEqual(entry["onFailure"], "block")
-        budget = int(re.search(r"DEADLINE = time.monotonic\(\) \+ (\d+)", GUARD.read_text()).group(1))
+        m = re.search(r"DEADLINE = time.monotonic\(\) \+ (\d+)", GUARD.read_text())
+        assert m is not None
+        budget = int(m.group(1))
         self.assertLess(budget, entry["timeout"])
 
     def test_git_diff_cannot_read_outside_the_repo(self) -> None:
