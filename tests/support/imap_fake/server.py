@@ -83,10 +83,22 @@ class _Conn:
         self.sock: socket.socket = sock
         self.buf = b""
         self.tls = False
+        self._lock = threading.Lock()
+        self._closed = False
 
     def upgrade(self, ctx: ssl.SSLContext) -> None:
-        self.sock = ctx.wrap_socket(self.sock, server_side=True)
+        """Publish the SSLSocket before the handshake so `close()` can interrupt it."""
+        with self._lock:
+            if self._closed:
+                raise OSError("connection closed")
+            self.sock = ctx.wrap_socket(self.sock, server_side=True, do_handshake_on_connect=False)
         self.buf = b""
+        try:
+            self.sock.do_handshake()
+        except AttributeError:
+            if not self._closed:
+                raise
+            raise OSError("connection closed during handshake") from None
         self.tls = True
 
     def _fill(self) -> bool:
@@ -110,9 +122,12 @@ class _Conn:
         return data
 
     def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            sock = self.sock
         with contextlib.suppress(OSError):
-            self.sock.shutdown(socket.SHUT_RDWR)
-        self.sock.close()
+            sock.shutdown(socket.SHUT_RDWR)
+        sock.close()
 
 
 class FakeImapServer:
@@ -307,16 +322,22 @@ class FakeImapServer:
         sub = words[1].upper() if verb == "UID" and len(words) > 1 else None
         return Command(tag, decoded, verb, sub, index)
 
-    def _log_pre_tls(self, conn: _Conn) -> None:
-        leftover, conn.buf = conn.buf, b""
-        if not leftover:
-            return
-        for raw in leftover.split(b"\n"):
-            line = raw.rstrip(b"\r")
-            if line:
-                self._log(conn, line)
-                self.commands.append(self._parse(line, conn.index))
-        self._event("pre-tls-bytes")
+    def _log_pre_tls(self, conn: _Conn) -> bool:
+        complete, _, conn.buf = conn.buf.rpartition(b"\n")
+        lines = [raw.rstrip(b"\r") for raw in complete.split(b"\n")]
+        lines = [line for line in lines if line]
+        for line in lines:
+            self._log(conn, line)
+            self.commands.append(self._parse(line, conn.index))
+        if lines:
+            self._event("pre-tls-bytes")
+        return bool(lines)
+
+    @staticmethod
+    def _plaintext_follows(conn: _Conn) -> bool:
+        """A TLS client's first byte after the OK is a handshake record (0x16)."""
+        head = conn.buf[:1] or conn.sock.recv(1, socket.MSG_PEEK)
+        return head not in (b"\x16", b"")
 
     def _lookup(self, cmd: Command) -> Sequence[Part] | Handler | None:
         keys = [f"{cmd.verb} {cmd.sub}"] if cmd.sub else []
@@ -359,12 +380,16 @@ class FakeImapServer:
             conn.sock.sendall(f"{cmd.tag} BAD STARTTLS unavailable\r\n".encode())
             return True
         conn.sock.sendall(f"{cmd.tag} OK begin TLS\r\n".encode() + self.starttls_inject)
-        self._log_pre_tls(conn)
+        pipelined = self._log_pre_tls(conn)
         if self.starttls_hold is not None:
             self._event("starttls-held")
             self.starttls_hold.wait(10)
         if self.starttls_late:
             conn.sock.sendall(self.starttls_late)
+        if self._plaintext_follows(conn):
+            if not pipelined:
+                self._event("pre-tls-bytes")
+            return True
         self._upgrade(conn)
         return True
 
