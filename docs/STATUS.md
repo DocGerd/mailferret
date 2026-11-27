@@ -15,9 +15,16 @@ Phase: 2a done (scaffold F0, spikes V1–V4) and the architecture update that fo
 
 ## Open
 
-- Design decisions left to their owning task: D2 the `{n+}` literal rule (A§6); B5 how the `command` backend recognises a gpg recipe to add the status channel (A§2.1); P1 `--exclude-newer` as a second pin (A§9.2); P3 whether the injection fixture ships or is generated, and whether P3 still needs D0 now that evals use MCP mocks (A§9.8). Confirm the proposed `L-26` and `L-27` ceilings (SECURITY §5).
+- Decisions left to their owning task:
+  - B5: the gpg status channel, `pass_fds` or a 0600 `--status-file`, and how the `command` backend recognises a gpg recipe to add it (A§2.1).
+  - D3: whether a non-ASCII login, not only a non-ASCII secret, takes `AUTHENTICATE PLAIN` (V1 ran the secret only; A§2 `auth/` row, T-02, T-16); a time-boxed marker for an indeterminate auth outcome, so other processes do not log in again at once (T-16).
+  - F2: whether `register claude-code` still refuses unless `--force`, now that the reason is a duplicate server rather than shadowing (A§9.5); where the WSL launcher script goes, and what happens when no space-free absolute path exists (A§9.6).
+  - P1: `--exclude-newer` as a second pin (A§9.2).
+  - P3: whether P3 still needs D0 now that evals use MCP mocks (PLAN P3).
+  - Confirm the proposed ceilings (SECURITY §5): `L-26` (D2), `L-27` (B4), `L-28` and `L-29` (B5).
+- Verification owned by agent tasks (ARCHITECTURE §10): item 7, the `gpg2`/`GPG_AGENT_INFO` branch warm and expired (B5); items 17 and 18 under `--strict` (P2); item 23, the job object and the keyring probe on Windows and macOS (B4, B5); item 24, no server starts in an eval run (P3).
 - C4: research and run the Windows job-object and macOS `RLIMIT_AS` PDF worker memory caps on windows and macos CI runners, plus the cyclic page-tree and 100,000-page bombs (A§10 item 10). Until then T-06 scopes the memory guarantee to Linux.
-- Manual checks only a user can run: ARCHITECTURE §10 items 5, 7, 9, 14, 19, 21 and 22.
+- Manual checks only a user can run: ARCHITECTURE §10 items 5, 7 (the client- or `wsl.exe`-launched part), 9, 14, 19, 21 and 22.
 - Parked: issue #10, commit-guard hardening. The guard stays best effort; `.githooks` and CI `scan` enforce.
 
 ## Contributor notes
