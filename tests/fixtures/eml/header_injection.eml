@@ -1,0 +1,10 @@
+From: Alice <user@example.com>
+To: Bob <bob@example.com>
+Date: Mon, 01 Jan 2024 10:00:00 +0000
+Message-ID: <inj@example.com>
+Subject: hello%0d%0aBcc: attacker@example.com
+X-Raw: a
+ Bcc: attacker@example.com
+Content-Type: text/plain; charset=utf-8
+
+Body.

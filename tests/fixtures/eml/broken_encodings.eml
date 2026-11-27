@@ -1,0 +1,19 @@
+From: Alice <user@example.com>
+To: Bob <bob@example.com>
+Date: Mon, 01 Jan 2024 10:00:00 +0000
+Message-ID: <enc@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="m"
+
+--m
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: base64
+
+SGVsbG8h!!@@bad
+--m
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+bad escape =ZZ and soft=
+break
+--m--
