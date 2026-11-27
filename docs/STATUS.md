@@ -1,15 +1,13 @@
 # Status
 
-Phase: 1 (design) approved at Checkpoint 1.
+Phase: RESTART POINT A done (Claude Code project configuration). Restart required.
 
 ## Done
 
-- Phase 1 drafts: `docs/ARCHITECTURE.md`, `docs/SECURITY.md`, `docs/PLAN.md`.
-- Adversarial plugin review: verdicts accepted and applied (ARCHITECTURE §9.7).
-- Checkpoint 1 decisions recorded (ARCHITECTURE §11): MIT license, `command`/`pass` WSL default, dependency license policy with dev-only Hypothesis, `register claude-desktop` first, plugin components accepted.
-- No open design decisions remain beyond the PLAN verify spikes.
+- Phase 1 design approved at Checkpoint 1 (`docs/ARCHITECTURE.md` §11).
+- Claude Code project configuration: `.claude/agents/mf-*`, `.claude/skills/`, `.claude/settings.json` (permissions, ruff/test/PII hooks), `.mcp.json` (Context7, development only), `scripts/pii_check.py` + `.github/workflows/pii-check.yml`, `.gitattributes`.
 
 ## Next
 
-- RESTART POINT A: Claude Code project configuration.
-- Then Phase 2 per `docs/PLAN.md`.
+1. Start `claude` in the repo and say: Continue from docs/STATUS.md
+2. Phase 2 per `docs/PLAN.md`: first the verification spikes V1–V4 (`mf-researcher`), in parallel with the scaffold F0 (`mf-implementer`).
