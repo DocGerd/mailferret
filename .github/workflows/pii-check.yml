@@ -11,10 +11,48 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out the head with full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
-      - name: Scan tracked files
-        run: python3 scripts/pii_check.py
+          path: head
+      # A PR must not judge itself with a scanner it can edit.
+      - name: Check out the base branch's scanner
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+          path: base
+      - name: Scan the tree, every commit, message and author/committer email
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        working-directory: head
+        run: |
+          set -eu
+          scanner="$GITHUB_WORKSPACE/head/scripts/pii_check.py"
+          if [ "$EVENT" = pull_request ]; then
+            range="$BASE_SHA..$HEAD_SHA"
+            if [ -f "$GITHUB_WORKSPACE/base/scripts/pii_check.py" ]; then
+              scanner="$GITHUB_WORKSPACE/base/scripts/pii_check.py"
+            else
+              echo "::warning::The base branch has no scanner yet; using the PR's copy (bootstrap only)."
+            fi
+          elif [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ]; then
+            range="$BEFORE..$AFTER"
+          else
+            range="$AFTER"
+          fi
+          python3 -I "$scanner"
+          python3 -I "$scanner" --commits "$range"
+      - name: Scanner and guard self-tests
+        working-directory: head
+        run: python3 -I -m unittest discover -s tests/tooling
