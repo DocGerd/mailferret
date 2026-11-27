@@ -184,10 +184,12 @@ class FakeImapServer:
             self._listener.shutdown(socket.SHUT_RDWR)
         with contextlib.suppress(OSError):
             socket.create_connection(("127.0.0.1", self.port), timeout=1).close()
+        if self._accept_thread.is_alive():
+            self._accept_thread.join(5)
         self._listener.close()
         with self._cond:
             conns = list(self._conns)
-            threads = [self._accept_thread, *self._threads]
+            threads = list(self._threads)
         for conn in conns:
             conn.close()
         for thread in threads:
@@ -226,17 +228,16 @@ class FakeImapServer:
                 self._connections += 1
                 index = self._connections
             self._event(f"accepted:{index}")
+            conn = _Conn(sock, index)
             thread = threading.Thread(
-                target=self._serve, args=(sock, index), name="fake-imap-conn", daemon=True
+                target=self._serve, args=(conn,), name="fake-imap-conn", daemon=True
             )
             with self._cond:
+                self._conns.append(conn)
                 self._threads.append(thread)
             thread.start()
 
-    def _serve(self, sock: socket.socket, index: int) -> None:
-        conn = _Conn(sock, index)
-        with self._cond:
-            self._conns.append(conn)
+    def _serve(self, conn: _Conn) -> None:
         try:
             if self.implicit_tls:
                 self._upgrade(conn)
@@ -295,12 +296,27 @@ class FakeImapServer:
             self._log(conn, tail)
             line = tail
             text += b"<lit>" + tail
+        return self._parse(text, conn.index)
+
+    @staticmethod
+    def _parse(text: bytes, index: int) -> Command:
         decoded = text.decode("latin-1")
         tag, _, rest = decoded.partition(" ")
         words = rest.split(" ")
         verb = words[0].upper()
         sub = words[1].upper() if verb == "UID" and len(words) > 1 else None
-        return Command(tag, decoded, verb, sub, conn.index)
+        return Command(tag, decoded, verb, sub, index)
+
+    def _log_pre_tls(self, conn: _Conn) -> None:
+        leftover, conn.buf = conn.buf, b""
+        if not leftover:
+            return
+        for raw in leftover.split(b"\n"):
+            line = raw.rstrip(b"\r")
+            if line:
+                self._log(conn, line)
+                self.commands.append(self._parse(line, conn.index))
+        self._event("pre-tls-bytes")
 
     def _lookup(self, cmd: Command) -> Sequence[Part] | Handler | None:
         keys = [f"{cmd.verb} {cmd.sub}"] if cmd.sub else []
@@ -343,6 +359,7 @@ class FakeImapServer:
             conn.sock.sendall(f"{cmd.tag} BAD STARTTLS unavailable\r\n".encode())
             return True
         conn.sock.sendall(f"{cmd.tag} OK begin TLS\r\n".encode() + self.starttls_inject)
+        self._log_pre_tls(conn)
         if self.starttls_hold is not None:
             self._event("starttls-held")
             self.starttls_hold.wait(10)

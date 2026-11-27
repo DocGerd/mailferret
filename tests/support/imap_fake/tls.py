@@ -21,7 +21,7 @@ distinguished_name = dn
 x509_extensions = ext
 prompt = no
 [dn]
-CN = {cn}
+CN = mailferret test certificate
 [ext]
 subjectAltName = {san}
 basicConstraints = critical, CA:TRUE
@@ -30,6 +30,8 @@ keyUsage = critical, digitalSignature, keyCertSign
 
 
 def _san_entry(name: str) -> str:
+    if "%" in name or "," in name or not name.isprintable():
+        raise ValueError(f"invalid certificate name: {name!r}")
     try:
         ipaddress.ip_address(name)
     except ValueError:
@@ -71,13 +73,13 @@ def _find_openssl() -> str:
 
 
 def make_tls_material(directory: Path, names: Sequence[str] = DEFAULT_NAMES) -> TlsMaterial:
-    """Self-signed cert whose SAN lists `names`; the client context trusts it as a CA."""
+    """Self-signed cert whose SAN lists `names` (its CN is not a host name); trusted as a CA."""
     if not names:
         raise ValueError("names must not be empty")
     san = ", ".join(_san_entry(name) for name in names)
     openssl = _find_openssl()
     config = directory / "openssl.cnf"
-    config.write_text(_CONFIG.format(cn="localhost", san=san))
+    config.write_text(_CONFIG.format(san=san))
     cert, key = directory / "cert.pem", directory / "key.pem"
     subprocess.run(  # noqa: S603
         [

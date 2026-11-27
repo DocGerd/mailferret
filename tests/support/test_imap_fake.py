@@ -311,6 +311,30 @@ def test_stop_leaves_no_threads_behind() -> None:
     raw.close()
 
 
+def test_stop_closes_a_connection_accepted_during_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = set(threading.enumerate())
+    server = FakeImapServer()
+    record = server._event
+
+    def hold_until_stopping(name: str) -> None:
+        record(name)
+        if name == "accepted:1":
+            server._stop.wait(TIMEOUT)
+
+    monkeypatch.setattr(server, "_event", hold_until_stopping)
+    server.start()
+    raw = Raw(server)
+    server.wait_for("accepted:1")
+    server.stop()
+    leaked = [t for t in threading.enumerate() if t not in before and t.is_alive()]
+    assert leaked == []
+    while raw.sock.recv(65536):
+        pass
+    raw.close()
+
+
 def test_starttls_advertised_only_before_tls(
     fake_imap_tls: FakeImapServer, tls_material: TlsMaterial
 ) -> None:
@@ -350,9 +374,43 @@ def test_trusted_cert_for_another_name_fails_hostname_verification(
         assert all(c.verb != "LOGIN" for c in server.commands)
 
 
-def test_cert_names_must_be_valid(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "name",
+    [
+        "bad name\n[x]",
+        "fe80::1%x\nsubjectAltName = DNS:evil.example.com",
+        "fe80::1%eth0",
+        "example.com,DNS:evil.example.com",
+        "example.com\r",
+        "example\x00.com",
+        "example\u200b.com",
+        "",
+    ],
+)
+def test_cert_names_must_be_valid(tmp_path: Path, name: str) -> None:
     with pytest.raises(ValueError, match="invalid certificate name"):
-        make_tls_material(tmp_path, ("bad name\n[x]",))
+        make_tls_material(tmp_path, (name,))
+
+
+@pytest.mark.parametrize(
+    ("hostname", "verifies"),
+    [("localhost", False), ("127.0.0.1", False), ("192.0.2.1", True)],
+)
+def test_ip_only_material_matches_only_its_own_address(
+    ip_only_material: TlsMaterial, hostname: str, verifies: bool
+) -> None:
+    with FakeImapServer(tls=ip_only_material) as server:
+        raw = Raw(server)
+        raw.read_until(b"\r\n")
+        raw.send(b"a1 STARTTLS\r\n")
+        assert raw.read_until(b"\r\n") == b"a1 OK begin TLS\r\n"
+        ctx = ip_only_material.client_context()
+        if verifies:
+            raw.sock = ctx.wrap_socket(raw.sock, server_hostname=hostname)
+        else:
+            with pytest.raises(ssl.SSLCertVerificationError):
+                ctx.wrap_socket(raw.sock, server_hostname=hostname)
+        raw.close()
 
 
 def test_untrusted_cert_fails_client_verification(fake_imap_tls: FakeImapServer) -> None:
@@ -369,6 +427,32 @@ def test_starttls_injection_arrives_before_handshake(fake_imap_tls: FakeImapServ
     assert raw.read_until(b"\r\n") == b"a1 OK begin TLS\r\n"
     assert raw.read_until(b"\r\n") == b"* CAPABILITY IMAP4rev1 XINJECTED\r\n"
     raw.close()
+
+
+def test_plaintext_sent_after_starttls_is_logged_not_discarded(
+    fake_imap_tls: FakeImapServer, tls_material: TlsMaterial
+) -> None:
+    raw = Raw(fake_imap_tls)
+    raw.read_until(b"\r\n")
+    raw.send(b"a1 STARTTLS\r\na2 LOGIN user@example.com dummy\r\n")
+    assert raw.read_until(b"\r\n") == b"a1 OK begin TLS\r\n"
+    raw.sock = tls_material.client_context().wrap_socket(raw.sock, server_hostname="127.0.0.1")
+    raw.send(b"a3 NOOP\r\n")
+    assert raw.read_until(b"\r\n") == b"a3 OK done\r\n"
+    assert fake_imap_tls.wire == ["a1 STARTTLS", "a2 LOGIN user@example.com dummy", "a3 NOOP"]
+    assert [c.verb for c in fake_imap_tls.commands] == ["STARTTLS", "LOGIN", "NOOP"]
+    assert fake_imap_tls.events.count("pre-tls-bytes") == 1
+    assert fake_imap_tls.events.index("pre-tls-bytes") < fake_imap_tls.events.index("handshake")
+    raw.close()
+
+
+def test_starttls_without_pipelined_bytes_records_no_pre_tls_event(
+    fake_imap_tls: FakeImapServer, tls_material: TlsMaterial
+) -> None:
+    client = imaplib.IMAP4("127.0.0.1", fake_imap_tls.port, timeout=TIMEOUT)
+    client.starttls(tls_material.client_context())
+    client.logout()
+    assert "pre-tls-bytes" not in fake_imap_tls.events
 
 
 def test_starttls_late_injection_waits_for_release(fake_imap_tls: FakeImapServer) -> None:
