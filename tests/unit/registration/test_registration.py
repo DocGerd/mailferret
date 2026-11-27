@@ -13,11 +13,13 @@ from mailferret.registration import (
     DuplicateEntryError,
     EntryState,
     RegistrationError,
+    VerificationError,
     atomic_write_text,
     backup_file,
     claude_code_scope_file,
     desktop_candidates,
     entry_state,
+    files,
     merge_server,
 )
 
@@ -189,3 +191,170 @@ def test_desktop_candidates_linux_and_windows(tmp_path: Path) -> None:
     env = {"APPDATA": str(appdata), "LOCALAPPDATA": str(tmp_path / "Local")}
     got = desktop_candidates("win32", env, tmp_path)
     assert [(c.path, c.kind) for c in got] == [(win, "regular"), (pkg, "msix")]
+
+
+def test_desktop_candidates_wsl_reads_windows_side_only(tmp_path: Path) -> None:
+    mount = tmp_path / "mnt"
+    alice = mount / "c" / "Users" / "alice" / "AppData"
+    cfg = alice / "Roaming" / "Claude" / "claude_desktop_config.json"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("{}")
+    pkg = alice / "Local" / "Packages" / "Claude_abc123"
+    pkg.mkdir(parents=True)
+    (mount / "d" / "Users" / "bob").mkdir(parents=True)
+    (mount / "wsl").mkdir()
+    linux = tmp_path / "home" / ".config" / "Claude" / "claude_desktop_config.json"
+    linux.parent.mkdir(parents=True)
+    linux.write_text("{}")
+
+    env = {"WSL_DISTRO_NAME": "Distro"}
+    got = desktop_candidates("linux", env, tmp_path / "home", wsl_mount=mount)
+    assert [(c.path, c.kind) for c in got] == [(cfg, "regular"), (pkg, "msix")]
+    plain = desktop_candidates("linux", {}, tmp_path / "home", wsl_mount=mount)
+    assert [c.path for c in plain] == [linux]
+
+
+def test_desktop_candidates_wsl_without_mount(tmp_path: Path) -> None:
+    env = {"WSL_DISTRO_NAME": "Distro"}
+    assert desktop_candidates("linux", env, tmp_path, wsl_mount=tmp_path / "none") == []
+
+
+def test_merge_server_detects_modification_between_read_and_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "c.json"
+    _write(cfg, {"k": 1})
+    other = json.dumps({"k": 2, "written_by_someone_else": True})
+    real_backup = files.backup_file
+
+    def racing_backup(path: Path, **kw: Any) -> Path:
+        path.write_text(other)
+        return real_backup(path, **kw)
+
+    monkeypatch.setattr(files, "backup_file", racing_backup)
+    with pytest.raises(ConcurrentModificationError):
+        merge_server(cfg, "mailferret", ENTRY)
+    assert cfg.read_text() == other
+    assert _temps(tmp_path) == []
+
+
+def _write_other_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    real = files.atomic_write_text
+
+    def wrong(path: Path, text: str, **kw: Any) -> None:
+        real(path, json.dumps({"mcpServers": {}}), **kw)
+
+    monkeypatch.setattr(files, "atomic_write_text", wrong)
+
+
+def test_verification_failure_after_replace_carries_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "c.json"
+    _write(cfg, {"k": 1})
+    _write_other_entry(monkeypatch)
+    with pytest.raises(VerificationError) as info:
+        merge_server(cfg, "mailferret", ENTRY)
+    assert not isinstance(info.value, RegistrationError)
+    assert info.value.backup is not None
+    assert json.loads(info.value.backup.read_text()) == {"k": 1}
+    assert info.value.path == cfg
+
+
+def test_verification_failure_on_create_has_no_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "c.json"
+    _write_other_entry(monkeypatch)
+    with pytest.raises(VerificationError) as info:
+        merge_server(cfg, "mailferret", ENTRY)
+    assert info.value.backup is None
+
+
+def test_verification_failure_when_rewritten_file_is_unparseable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "c.json"
+    real = files.atomic_write_text
+
+    def garbage(path: Path, text: str, **kw: Any) -> None:
+        real(path, "{not json", **kw)
+
+    monkeypatch.setattr(files, "atomic_write_text", garbage)
+    with pytest.raises(VerificationError):
+        merge_server(cfg, "mailferret", ENTRY)
+
+
+@posix_only
+def test_foreign_owner_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = tmp_path / "c.json"
+    _write(cfg, {})
+    owner = cfg.stat().st_uid
+    monkeypatch.setattr(os, "geteuid", lambda: owner + 1)
+    with pytest.raises(RegistrationError):
+        merge_server(cfg, "mailferret", ENTRY)
+    assert json.loads(cfg.read_text()) == {}
+    assert _backups(cfg) == []
+
+
+@posix_only
+def test_no_effective_write_access_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = tmp_path / "c.json"
+    _write(cfg, {})
+    monkeypatch.setattr(os, "access", lambda *a, **k: False)
+    with pytest.raises(RegistrationError):
+        merge_server(cfg, "mailferret", ENTRY)
+    assert json.loads(cfg.read_text()) == {}
+
+
+def test_create_never_overwrites_file_that_appears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "c.json"
+    real_link = os.link
+
+    def racing_link(src: Any, dst: Any, **kw: Any) -> None:
+        Path(dst).write_text('{"theirs": true}')
+        real_link(src, dst, **kw)
+
+    monkeypatch.setattr(os, "link", racing_link)
+    with pytest.raises(ConcurrentModificationError):
+        merge_server(cfg, "mailferret", ENTRY)
+    assert cfg.read_text() == '{"theirs": true}'
+    assert _temps(tmp_path) == []
+
+
+def test_create_without_hard_links_still_never_overwrites(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_link(src: object, dst: object) -> None:
+        raise PermissionError("no hard links")
+
+    monkeypatch.setattr(os, "link", no_link)
+    cfg = tmp_path / "c.json"
+    assert merge_server(cfg, "mailferret", ENTRY) is None
+    assert json.loads(cfg.read_text()) == {"mcpServers": {"mailferret": ENTRY}}
+    assert _temps(tmp_path) == []
+
+    other = tmp_path / "d.json"
+    other.write_text("keep")
+    with pytest.raises(ConcurrentModificationError):
+        atomic_write_text(other, "{}", exclusive=True)
+    assert other.read_text() == "keep"
+    assert _temps(tmp_path) == []
+
+
+@pytest.mark.parametrize("command", ["uvx", "./uvx", "", None, 3, "C:uvx"])
+def test_relative_command_refused(tmp_path: Path, command: object) -> None:
+    cfg = tmp_path / "c.json"
+    with pytest.raises(RegistrationError):
+        merge_server(cfg, "mailferret", {"command": command, "args": []})
+    assert not cfg.exists()
+    assert _temps(tmp_path) == []
+
+
+def test_windows_absolute_command_accepted(tmp_path: Path) -> None:
+    cfg = tmp_path / "c.json"
+    entry = {"command": "C:\\Windows\\System32\\wsl.exe", "args": ["--exec", "/x"]}
+    merge_server(cfg, "mailferret", entry)
+    assert json.loads(cfg.read_text())["mcpServers"]["mailferret"] == entry

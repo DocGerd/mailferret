@@ -9,14 +9,14 @@ import stat
 import tempfile
 from datetime import UTC, datetime
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 _PRIVATE_MODE = 0o600
 
 
 class RegistrationError(Exception):
-    """The config cannot be safely modified; nothing was written."""
+    """The config cannot be safely modified; the config file was not changed."""
 
 
 class ConcurrentModificationError(RegistrationError):
@@ -25,6 +25,19 @@ class ConcurrentModificationError(RegistrationError):
 
 class DuplicateEntryError(RegistrationError):
     """A different entry of that name already exists."""
+
+
+class VerificationError(Exception):
+    """The file was replaced but did not re-parse as written.
+
+    Deliberately not a RegistrationError: the config has changed. `backup` is the
+    pre-write copy to restore from, or None when the file was newly created.
+    """
+
+    def __init__(self, message: str, *, path: Path, backup: Path | None) -> None:
+        super().__init__(message)
+        self.path = path
+        self.backup = backup
 
 
 class EntryState(Enum):
@@ -60,35 +73,64 @@ def backup_file(path: Path, *, now: datetime | None = None) -> Path:
     return target
 
 
+def _write_fd(fd: int, text: str) -> None:
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
+def _install_new(tmp: Path, path: Path, text: str, mode: int) -> None:
+    appeared = ConcurrentModificationError(f"{path.name} appeared during update")
+    try:
+        os.link(tmp, path)
+        return
+    except FileExistsError:
+        raise appeared from None
+    except OSError:
+        pass
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    except FileExistsError:
+        raise appeared from None
+    _write_fd(fd, text)
+    if os.name == "posix":
+        path.chmod(mode)
+
+
 def atomic_write_text(
     path: Path,
     text: str,
     *,
     mode: int = _PRIVATE_MODE,
     expect: os.stat_result | None = None,
+    exclusive: bool = False,
 ) -> None:
     """Write via a same-directory temp file and `os.replace`.
 
     With `expect`, the file's mtime and size must still match before replacing.
+    With `exclusive`, an existing file is never overwritten: the temp file is
+    hard-linked into place and EEXIST raises ConcurrentModificationError. Where
+    hard links are unavailable it falls back to an `O_EXCL` create, which keeps
+    the no-overwrite guarantee but is not atomic for concurrent readers.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(text)
-            fh.flush()
-            os.fsync(fh.fileno())
+        _write_fd(fd, text)
         if os.name == "posix":
             tmp.chmod(mode)
+        if exclusive:
+            _install_new(tmp, path, text, mode)
+            return
         if expect is not None:
             now = path.stat()
             if (now.st_mtime_ns, now.st_size) != (expect.st_mtime_ns, expect.st_size):
                 raise ConcurrentModificationError(f"{path.name} changed during update")
         os.replace(tmp, path)
-    except BaseException:
+    finally:
         tmp.unlink(missing_ok=True)
-        raise
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -104,9 +146,21 @@ def _load(path: Path) -> dict[str, Any]:
     return data
 
 
-def _verify(path: Path, name: str, entry: dict[str, Any]) -> None:
-    if _load(path).get("mcpServers", {}).get(name) != entry:
-        raise RegistrationError(f"{path.name} did not re-parse as written")
+def _verify(path: Path, name: str, entry: dict[str, Any], backup: Path | None) -> None:
+    try:
+        written = _load(path).get("mcpServers", {}).get(name)
+    except RegistrationError as exc:
+        raise VerificationError(str(exc), path=path, backup=backup) from exc
+    if written != entry:
+        raise VerificationError(
+            f"{path.name} did not re-parse as written", path=path, backup=backup
+        )
+
+
+def _is_absolute(command: object) -> bool:
+    return isinstance(command, str) and (
+        PurePosixPath(command).is_absolute() or PureWindowsPath(command).is_absolute()
+    )
 
 
 def merge_server(
@@ -119,19 +173,28 @@ def merge_server(
 ) -> Path | None:
     """Add `entry` under `mcpServers[name]`, touching nothing else.
 
+    `entry["command"]` must be an absolute path (POSIX or Windows form).
     Returns the backup path, or None when the file did not exist or the entry
     was already identical (nothing written). A different existing entry raises
-    DuplicateEntryError unless `replace`.
+    DuplicateEntryError unless `replace`. RegistrationError means the file is
+    unchanged; VerificationError means it was replaced and carries the backup.
     """
+    if not _is_absolute(entry.get("command")):
+        raise RegistrationError("entry command must be an absolute path")
     path = Path(os.path.realpath(path))
     if not path.exists():
-        atomic_write_text(path, json.dumps({"mcpServers": {name: entry}}, indent=2) + "\n")
-        _verify(path, name, entry)
+        text = json.dumps({"mcpServers": {name: entry}}, indent=2) + "\n"
+        atomic_write_text(path, text, exclusive=True)
+        _verify(path, name, entry, None)
         return None
 
     before = path.stat()
-    if os.name == "posix" and not before.st_mode & stat.S_IWUSR:
-        raise RegistrationError(f"{path.name} is read-only")
+    if os.name == "posix" and (
+        not before.st_mode & stat.S_IWUSR
+        or before.st_uid != os.geteuid()
+        or not os.access(path, os.W_OK)
+    ):
+        raise RegistrationError(f"{path.name} is read-only or not owned by this user")
     config = _load(path)
     state = entry_state(config, name, entry)
     if state is EntryState.IDENTICAL:
@@ -143,5 +206,5 @@ def merge_server(
     text = json.dumps(config, indent=2, ensure_ascii=False) + "\n"
     backup = backup_file(path, now=now)
     atomic_write_text(path, text, mode=stat.S_IMODE(before.st_mode), expect=before)
-    _verify(path, name, entry)
+    _verify(path, name, entry, backup)
     return backup
