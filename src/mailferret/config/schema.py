@@ -189,6 +189,7 @@ class Config(_Strict):
     default_account: AccountId | None = None
     limits: Limits = Field(default_factory=Limits)
     accounts: dict[AccountId, Account] = Field(default_factory=dict)
+    presets: dict[str, dict[str, Any]] = Field(default_factory=dict)
     smtp: Disabled = Field(default_factory=Disabled)
 
     @field_validator("schema_version")
