@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PreToolUse(Bash) guard for `git commit` in this project.
+"""PreToolUse(Bash) guard for commit-creating git commands in this project.
 
   commit_guard.py pii    block (exit 2) on credentials/personal data in what the commit records
   commit_guard.py tests  block (exit 2) if `uv run pytest -q -x` fails; skipped without pyproject.toml
@@ -7,8 +7,7 @@
 
 A command that mentions git and commit but cannot be parsed unambiguously is
 treated as a commit and scanned in full. Commits in any repository outside
-CLAUDE_PROJECT_DIR are left alone: nothing runs there. This hook is a
-convenience layer; `.githooks/pre-commit` is the enforcement point.
+CLAUDE_PROJECT_DIR are left alone: nothing runs there.
 """
 
 from __future__ import annotations
@@ -22,6 +21,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# CI `pii-check` on every PR is the authoritative gate; this hook is defense in depth.
 GIT = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
 SEPARATORS = re.compile(r"&&|\|\||[;|&\n()]")
 GIT_OPTS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
@@ -29,6 +29,15 @@ COMMIT_OPTS_WITH_VALUE = {
     "-m", "--message", "-F", "--file", "-C", "--reuse-message", "-c", "--reedit-message",
     "--author", "--date", "--fixup", "--squash", "-t", "--template", "--cleanup", "--trailer",
     "--pathspec-from-file",
+}
+# Subcommands that create commits from the index, the working tree or external input.
+COMMIT_LIKE = {"commit", "merge", "cherry-pick", "revert", "am", "rebase", "stash", "commit-tree"}
+# Known not to create commits: a `commit` word in their arguments is not a signal.
+NON_COMMITTING = {
+    "log", "show", "diff", "status", "grep", "blame", "shortlog", "rev-list", "rev-parse", "describe",
+    "cat-file", "ls-files", "ls-tree", "diff-tree", "show-ref", "for-each-ref", "reflog", "branch", "tag",
+    "add", "rm", "mv", "restore", "reset", "checkout", "switch", "fetch", "clone", "init", "remote",
+    "clean", "format-patch", "help", "version", "worktree", "whatchanged", "name-rev", "merge-base",
 }
 WRAPPERS = {"timeout", "time", "nice", "nohup", "stdbuf", "command", "builtin", "env", "then", "do", "else", "exec"}
 
@@ -76,10 +85,16 @@ def analyse(command: str) -> Commit:
         sub, rest = (tokens[i], tokens[i + 1 :]) if i < len(tokens) else ("", [])
         if sub in ("add", "rm", "mv"):
             result.adds = True
-        if sub != "commit":
+        if sub not in COMMIT_LIKE:
+            if re.search(r"\bcommit\b", segment) and sub not in NON_COMMITTING:  # update-ref, aliases
+                result.detected = result.ambiguous = True
+                result.dirs.append(cdir or "")
             continue
         result.detected = True
         result.dirs.append(cdir or "")
+        if sub != "commit":
+            result.worktree = True
+            continue
         j = 0
         while j < len(rest):
             arg = rest[j]

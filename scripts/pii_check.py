@@ -36,7 +36,7 @@ PLACEHOLDER_NAMES = {
 
 # Neutralise repo config that could run programs (fsmonitor, external diff, textconv).
 GIT = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
-DIFF = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text", "-U0", "--diff-filter=ACMR"]
+DIFF = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text", "-U0", "--diff-filter=d"]  # every status except deletions
 
 # Split so the scanner does not flag its own source.
 _KEY_HEADER = "-----BEGIN " + r"(?:[A-Z0-9]+ )*PRIVATE KEY" + "-----"
@@ -101,6 +101,25 @@ def git(*args: str) -> str:
     return (out.stdout or b"").decode("utf-8", "replace")
 
 
+class ScanError(Exception):
+    pass
+
+
+HANDLED_STATUSES = frozenset("ACMRT")
+
+
+def scan_changes(local: list[str], *extra: str) -> Iterator[str]:
+    """Scan added lines of a diff; a status the scanner does not handle is an error."""
+    fields = git("diff", "--name-status", "-z", "--no-color", "--no-ext-diff", "--no-textconv", "--diff-filter=d", *extra).split("\0")
+    i = 0
+    while i < len(fields) and fields[i]:
+        status = fields[i]
+        if status[0] not in HANDLED_STATUSES:
+            raise ScanError(f"unhandled diff status {status[0]!r}")
+        i += 1 + (2 if status[0] in "RC" else 1)
+    return scan_diff(git(*DIFF, *extra), local)
+
+
 def load_local_patterns() -> list[str]:
     try:
         path = Path(git("rev-parse", "--git-path", "info/pii-patterns").strip())
@@ -157,9 +176,9 @@ def main(argv: list[str] | None = None) -> int:
         local = load_local_patterns()
         findings: list[str] = []
         if args.staged:
-            findings += scan_diff(git(*DIFF, "--cached"), local)
+            findings += scan_changes(local, "--cached")
         if args.unstaged:
-            findings += scan_diff(git(*DIFF), local)
+            findings += scan_changes(local)
         if args.include_untracked:
             untracked = git("ls-files", "--others", "--exclude-standard", "-z").split("\0")
             findings += scan_files([p for p in untracked if p], local)
@@ -167,8 +186,8 @@ def main(argv: list[str] | None = None) -> int:
             findings += scan_files(args.paths, local)
         if not (args.staged or args.unstaged or args.include_untracked or args.paths):
             findings += scan_files([p for p in git("ls-files", "-z").split("\0") if p], local)
-    except (subprocess.SubprocessError, OSError) as exc:
-        print(f"pii_check: git failed ({exc.__class__.__name__}); treating as a failure", file=sys.stderr)
+    except (subprocess.SubprocessError, OSError, ScanError) as exc:
+        print(f"pii_check: scan failed ({exc.__class__.__name__}: {exc}); treating as a failure", file=sys.stderr)
         return 3
 
     if findings:
