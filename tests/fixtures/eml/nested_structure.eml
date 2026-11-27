@@ -1,0 +1,38 @@
+From: Alice <user@example.com>
+To: Bob <bob@example.com>
+Date: Mon, 01 Jan 2024 10:00:00 +0000
+Message-ID: <nest@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="m"
+
+--m
+Content-Type: multipart/alternative; boundary="a"
+
+--a
+Content-Type: text/plain; charset=utf-8
+
+plain
+--a
+Content-Type: multipart/related; boundary="r"
+
+--r
+Content-Type: text/html; charset=utf-8
+
+<p>html <img src="cid:x@example.com"></p>
+--r
+Content-Type: image/png
+Content-ID: <x@example.com>
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgo=
+--r--
+--a--
+--m
+Content-Type: message/rfc822
+
+From: inner@example.com
+Subject: inner
+Content-Type: text/plain
+
+inner body
+--m--
