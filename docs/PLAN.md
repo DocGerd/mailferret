@@ -28,7 +28,7 @@ Where a non-MIME task is security-heavy (guard, credentials, TLS), the extra scr
 | V1 | Spike: the imapclient/imaplib hook point for the command guard and read-side caps; ESEARCH exposure (A§10 items 1, 2, 10 for pypdf knobs). Output: a short note in `docs/research/` and a throwaway prototype test | — | T-08, T-10 | sonnet / medium |
 | V2 | Spike: GreenMail capabilities, auth-enabled users via `GREENMAIL_OPTS`, the TLS keystore/CA for `ca_file` tests, and whether APPEND preserves plus-address recipients (A§10 item 3) | — | T-07 | sonnet / medium |
 | V3 | Spike: headless credential behaviour on WSL (`pass` with expired agent cache and closed stdin; Secret Service bus discovery) (A§10 item 7) | — | T-17 | sonnet / medium |
-| V4 | Spike: SDK text content beside structured output; plugin detection and same-name shadowing; Desktop `.mcpb` `type: uv`; subdirectory plugin root on claude.ai/Cowork; Bash/MCP PATH inheritance; agent `tools` wildcards; `claude mcp add-json` (A§10 items 4–6, 9, 11–13) | — | T-04 | sonnet / medium |
+| V4 | Spike: SDK text content beside structured output; plugin detection and same-name shadowing; Desktop `.mcpb` `type: uv`; subdirectory plugin root on claude.ai/Cowork; Bash/MCP PATH inheritance; `command -v` on Windows; `claude mcp add-json`; Cowork host vs VM; `${VAR:-default}` and env inheritance; `uvx --constraints`; `${CLAUDE_PLUGIN_ROOT}` in `allowed-tools`; agent allowlist excluding Skill/Agent; `CLAUDECODE=1`; out-of-plugin evals and `claude plugin disable` (A§10 items 4–6, 9, 11–20) | — | T-04 | sonnet / medium |
 
 V1–V4 run in parallel with each other and with F0. A spike that contradicts the design returns to an opus / high architecture update before dependent tasks start.
 
@@ -36,7 +36,8 @@ V1–V4 run in parallel with each other and with F0. A spike that contradicts th
 
 | ID | Task | Deps | Threats | Model / effort |
 |---|---|---|---|---|
-| B1 | `config/`: schema, load/write, paths, env/flag override, reserved write/SMTP keys rejected, limits that can only lower | F0 | T-01, T-11 | sonnet / medium |
+| B1 | `config/`: schema, load/write, paths, env/flag override, `write`/`smtp` positions that validate only `enabled = false`, limits that can only lower | F0 | T-01, T-11 | sonnet / medium |
+| B7 | `write/api.py`, `smtp/api.py` protocols (A§2.5) + the AST and import-graph tests that keep them implementation-free and unimported | F0 | T-10 | sonnet / medium |
 | B2 | `providers/`: preset data (generic, hetzner), user presets, merge rules | B1 | — | sonnet / medium |
 | B3 | `logging.py`: stderr-only, redaction set, LOGIN/AUTHENTICATE line redaction | F0 | T-03 | sonnet / medium |
 | B4 | `credentials/` protocol, `Secret`, typed errors, `keyring` backend, backend detection (fail/null/plaintext, WSL) | F0, B3 | T-01, T-02, T-03 | sonnet / medium |
@@ -72,27 +73,27 @@ V1–V4 run in parallel with each other and with F0. A spike that contradicts th
 | ID | Task | Deps | Threats | Model / effort |
 |---|---|---|---|---|
 | E1 | `server/` envelope + output models | B6, C3 | T-04 | sonnet / medium |
-| E2 | `server/` app and tools, annotations, instructions, errors, exact tool-set test, `message_ref` | E1, D5, D6, D7 | T-04, T-10, T-14 | sonnet / medium |
-| E3 | `cli/`: `serve`, `accounts list`, `auth set` (TTY/stdin) | E2, B5 | T-01, T-03 | sonnet / medium |
-| E4 | `cli/setup`: interactive, preset or manual, read-only connection test | E3, B2 | T-01 | sonnet / medium |
-| E5 | `cli/doctor`: config, permissions, backend, connectivity, TLS, launcher on the client PATH, registrations | E3, F2 | T-11, T-17 | sonnet / medium |
+| E2 | `server/` app and tools, annotations, instructions, errors incl. `not_configured`, exact tool-set test, `message_ref`, `search` `Field` descriptions with examples (replaces the rejected search-syntax skill) | E1, D5, D6, D7 | T-04, T-10, T-14 | sonnet / medium |
+| E3 | `cli/`: `serve`, `accounts list`, `auth set` (TTY check before `getpass`, `--stdin`, refused under `CLAUDECODE=1`) | E2, B5 | T-01, T-03, T-20 | sonnet / medium |
+| E4 | `cli/setup`: interactive (same TTY rules as `auth set`), preset or manual, read-only connection test | E3, B2 | T-01, T-20 | sonnet / medium |
+| E5 | `cli/doctor`: config, permissions, backend, connectivity, TLS, launcher lookup, every visible registration incl. a manual entry shadowing a later plugin install | E3, F2 | T-11, T-17 | sonnet / medium |
 
 ### Phase 2f: registration and plugin
 
 | ID | Task | Deps | Threats | Model / effort |
 |---|---|---|---|---|
 | F1 | `registration/` core: discovery, backup, atomic write, duplicate detection | B1, V4 | T-12 | sonnet / medium |
-| F2 | `register claude-code` (via `claude mcp add-json`) + `register claude-desktop` (regular, MSIX, WSL→Windows), `--print`, `--force` policy (A§9.5) | F1, E3 | T-12 | sonnet / medium |
-| P1 | Plugin skeleton: `plugin/` manifests, `.mcp.json` pin, marketplace, `claude plugin validate --strict` in CI, version-coupling check | E2 | T-13 | opus / medium |
-| P2 | Plugin components that survived the Checkpoint 1 adversarial review of A§9.7 | P1, E5 | T-04, T-15 | opus / medium |
-| P3 | Plugin evals with mocked IMAP (`claude plugin eval`), if the CLI supports a local MCP fixture | P2, D0 | T-04 | opus / medium |
+| F2 | `register claude-code` (via `claude mcp add-json`) + `register claude-desktop` (regular, MSIX, WSL→Windows), `--print`, `--force` policy printing the plugin disable/uninstall command, scope-limited detection notice, constraints file copied to the data dir (A§9.4, §9.5) | F1, E3 | T-12 | sonnet / medium |
+| P1 | Plugin skeleton: `plugin/` manifests, `.mcp.json` with pin and `--constraints`, constraints generation, marketplace, `claude plugin validate --strict` in CI, version-set check (A§9.4) | E2 | T-13 | opus / medium |
+| P2 | `mail-reader` agent and `doctor` skill per A§9.7 (enumerated tools, stop-if-missing, output contract, `maxTurns`; ground-truth branch, exact pre-approvals, MCP_TIMEOUT detection) + the CI test that the agent's tools equal the server's read tools | P1, E5 | T-04, T-15, T-18 | opus / medium |
+| P3 | Plugin evals in `plugin-evals/` with mocked IMAP via `MAILFERRET_CONFIG` (`claude plugin eval`), incl. an injection mail through `mail-reader` | P2, D0 | T-04, T-18 | opus / medium |
 
 ### Phase 2g: docs and release
 
 | ID | Task | Deps | Threats | Model / effort |
 |---|---|---|---|---|
 | G1 | README: install, setup, credentials per platform (incl. the WSL recipe), config reference, registration, generic MCP client setup, presets, the T-18 residual risk | E5, F2, P2 | — | sonnet / low |
-| G2 | Release workflow: tag → trusted publishing → uvx smoke → plugin pin bump PR (A§9.4); the first release claims the PyPI name and is followed by the PR that adds the marketplace entry | P1 | T-13 | sonnet / medium |
+| G2 | Release workflow: tag → trusted publishing → uvx smoke → plugin pin bump PR that regenerates `constraints.txt` (A§9.4); the first release claims the PyPI name and is followed by the PR that adds the marketplace entry | P1 | T-13 | sonnet / medium |
 
 ## 3. Test strategy
 
@@ -135,7 +136,7 @@ No test touches a real mailbox. Integration tests are marked and skipped when Do
 | Wave | Runs in parallel |
 |---|---|
 | 1 | F0, V1, V2, V3, V4 |
-| 2 | B1, B3, C0, D0 |
+| 2 | B1, B3, B7, C0, D0 |
 | 3 | B2, B4, B6, D4 |
 | 4 | B5, C1, D1, F1 |
 | 5 | C2, C3, C5, D2 |
