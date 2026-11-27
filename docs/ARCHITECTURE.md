@@ -341,7 +341,7 @@ The adversarial review is done and its verdicts were accepted; Accepted at Check
 
 Each item belongs to a spike in `docs/PLAN.md` phase 2a (V1–V4; evidence in `docs/research/v*-*.md`). **Resolved**: verified, and the design follows. **Decided**: not verified, but the design no longer depends on it. **Open**: the named check and its owner; the design uses the stated fallback meanwhile.
 
-1. Guard hook point, read-side literal and line caps, pre-STARTTLS bytes. **Resolved (V1):** a guard mixin armed in `_new_tag` and enforced on every `send` (§6); per-command literal cap and response total in `read`, `imaplib._MAXLINE` from `L-20`, and the STARTTLS probe by feature in `_command_complete` (§2.2).
+1. Guard hook point, read-side literal and line caps, pre-STARTTLS bytes. **Resolved (V1):** a guard mixin armed in `_new_tag` and enforced on every `send` (§6); per-command literal cap and response total in `read`, `imaplib._MAXLINE` from `L-20`, and the STARTTLS probe by feature in `_command_complete` (§2.2). V1 covers the Python minors it ran; for any other supported minor, D1's and D2's every-minor tests are the check.
 2. ESEARCH. **Resolved (V1):** imapclient does not expose it; not used. Plain `UID SEARCH` over windowed UID ranges (§2.6).
 3. GreenMail capabilities. **Resolved (V2):** no STARTTLS, ESEARCH, CONDSTORE, THREAD or SPECIAL-USE, and `AUTHENTICATE PLAIN` does not authenticate. Those paths, and the PLAIN leg of `test_login_redaction`, run on the D0 fake server only (PLAN §3.2).
 4. A `CallToolResult` from an `MCPServer` tool with an output model keeps our text content. **Resolved (V4):** yes, in memory and over stdio; the low-level fallback is dropped.
