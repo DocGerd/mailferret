@@ -274,16 +274,18 @@ def scan_commits(report: Report, rev_range: str) -> None:
         if not identity_ok(committer):
             report.add(where, 0, "committer-email")
         report.text(f"{where} message", enumerate(message.splitlines(), 1))
-    # Merge commits are covered by their parents' commits and the final-tree scan.
-    for sha in git("rev-list", "--no-merges", rev_range).split():
-        names = git("diff-tree", "-r", "--root", "--no-commit-id", "--name-status", "-z", "--diff-filter=d", sha)
+    for line in git("rev-list", "--parents", rev_range).splitlines():
+        sha, *parents = line.split()
+        # A merge is diffed against its first parent, so content it introduces itself is scanned too.
+        trees = [parents[0], sha] if parents else ["--root", sha]
+        names = git("diff-tree", "-r", "--no-commit-id", "--name-status", "-z", "--diff-filter=d", *trees)
         fields, i = names.split("\0"), 0
         while i < len(fields) and fields[i]:
             step = 2 if fields[i][0] in "RC" else 1
             path = fields[i + step]
             i += 1 + step
             report.path(path, f"commit {sha[:12]}:")
-            patch = git_bytes("diff-tree", "-p", "--root", "--no-commit-id", *DIFF_OPTS, sha, "--", path)
+            patch = git_bytes("diff-tree", "-p", "--no-commit-id", *DIFF_OPTS, *trees, "--", path)
             scan_patch(report, path, patch, f"commit {sha[:12]}:")
 
 
