@@ -25,41 +25,47 @@ Dependency rule: arrows point one way. The limits table (`limits.py`, top level)
 | `config/` | pydantic models, `tomllib` load, `tomlkit` write (comment-preserving), `platformdirs` paths, `MAILFERRET_CONFIG` env and `--config` override (R§6) | The schema rejects any key named like a secret (`password`, `token`, `secret`) and rejects `write.enabled = true` / `smtp.enabled = true` with "not supported in this version" |
 | `providers/` | Presets as data: `generic`, `hetzner` (host, port, TLS mode, login is the full address, header quirks such as the alias header priority). User presets go under `[presets.<name>]` | A preset only supplies defaults; explicit account keys win |
 | `credentials/` | `CredentialBackend` protocol: `get`, `set`, `delete`, `describe()`. Backends: `keyring` (platform backend) and `command` (user argv). Backend detection, WSL detection, typed errors | The secret is a `Secret` wrapper whose `repr`/`str` is redacted. Entry key = service `mailferret/<account_id>`, username `<login>@<host>` (account-specific per R§11). Both backends bind the secret to `<login>@<host>` (T-11): `keyring` through the entry key, `command` through a binding record written by `auth set` to the data dir and checked before `get` runs |
-| `auth/` | `Authenticator` protocol: `authenticate(session, account, backend)`. `PasswordAuth` now (LOGIN; `AUTHENTICATE PLAIN` if LOGIN is unavailable). `XOAuth2Auth` later, via `imapclient.oauth2_login` | Checks `LOGINDISABLED` before loading the secret. A failed login is never retried (R§11) |
+| `auth/` | `Authenticator` protocol: `authenticate(session, account, backend)`. `PasswordAuth` now, choosing from the capabilities re-read after TLS: `LOGIN` unless `LOGINDISABLED`; else `AUTHENTICATE PLAIN` if `AUTH=PLAIN` is advertised; else `auth_failed` before `credentials/` is touched. `XOAuth2Auth` later, via `imapclient.oauth2_login` | A failed login is never retried, across processes too: it writes an auth-failed marker for `<login>@<host>` to the data dir, and every later login attempt from any server process returns `auth_failed` (naming the command) until `auth set`, `setup` or `auth retry <account>` clears it (R§11, T-16) |
 | `imap/` | `connect()`: TLS (implicit or STARTTLS), `SocketTimeout(connect, read)`, CAPABILITY logged and parsed into a `Capabilities` value; `ReadOnlySession`; the command guard; read-side size caps; per-account connection cache with an idle timeout | The only module holding an `IMAPClient`. It is never returned to callers (see §6) |
-| `query/` | `list_folders` (LIST + STATUS), `search` (criteria builder, SORT when advertised, paging, caps), `fetch` (structure-first), `thread`, alias scans | Criteria are always passed to imapclient as a list (never a raw string), so user text cannot inject IMAP syntax |
+| `query/` | `list_folders` (LIST + STATUS), `search` (criteria builder, SORT when advertised, paging, caps, post-filters per §2.6), `fetch` (structure-first), `thread`, alias scans | Criteria are always passed to imapclient as a list (never a raw string), so user text cannot inject IMAP syntax |
 | `content/` | `mime.py` (bounded walk), `charset.py` (decode with fallback chain then `errors="replace"`), `headers.py` (RFC 2047/2231, size caps), `html.py` (strip hidden content, then `inscriptis`), `pdf_worker.py` (subprocess, `pypdf`), `truncate.py` | No network, no file writes. Every limit (`L-nn`) is enforced here or in `imap/` |
 | `aliases/` | Resolve the recipient alias from configured headers in configured priority; exact and wildcard match; aggregation for `list_aliases` (R§5) | Off when an account has neither alias domains nor a plus separator |
 | `server/` | `MCPServer` app, tool functions, pydantic output models, the untrusted-content envelope, `instructions=` text (passed by keyword) | Registers read tools only. There is no code path that registers a write tool in this version |
 | `cli/` | `click` app: `setup`, `auth set`, `accounts list`, `doctor`, `register claude-code / claude-desktop [--print]`, `serve` | Secrets are read with `getpass` (TTY) or from stdin with `--stdin`, never from argv |
 | `registration/` | Client config discovery, backup, atomic JSON write, duplicate detection | Never writes a secret, writes absolute launcher paths only |
 | `limits.py` | The `L-nn` ceilings as one frozen model, merged with `[limits]` (lower only) | Imports nothing from mailferret, so `content/` and `imap/` can enforce limits without depending on `server/` |
-| `logging.py` | stderr-only logging (stdout belongs to the MCP protocol), redaction filter | Every secret seen by `credentials/` is added to a process-wide redaction set |
+| `logging.py` | stderr-only logging (stdout belongs to the MCP protocol), redaction filter | Every secret seen by `credentials/` is added to a process-wide redaction set in three forms: raw, IMAP-quoted, and the base64 `AUTHENTICATE PLAIN` blob; continuation lines are redacted while an AUTHENTICATE is in progress. No record contains a mail-derived string; detail is limited to IDs, sizes and codes (T-21) |
 
 ### 2.1 Credentials and the WSL strategy
 
 Resolution per account: `credential_backend = "keyring" | "command"` (default `keyring`).
 
 - `keyring`: the platform backend (macOS Keychain, Windows Credential Locker, Secret Service). `detect.py` rejects the fail, null, chainer-with-no-real-backend and any plaintext backend. On a rejected backend `get` raises `CredentialBackendUnavailable` with a hint to run `doctor`.
-- `command`: `credential_command.get = [argv]` prints the secret on stdout. `credential_command.set = [argv]` receives it on stdin. No shell, an absolute path resolved at setup, a timeout (`L-14`), stdin closed for `get` so a pinentry or prompt fails fast instead of hanging, and stderr is captured but never logged verbatim. `auth set` stays the write path (R§7) through `set`.
+- `command`: `credential_command.get = [argv]` prints the secret on stdout. `credential_command.set = [argv]` receives it on stdin. `auth set` stays the write path (R§7) through `set`. Process rules (T-17):
+  - No shell; an absolute executable path resolved at setup; `cwd` = the mailferret data dir; a minimal env (`PATH`, `HOME`, `USER`/`LOGNAME`, locale, `GNUPGHOME`, `PASSWORD_STORE_DIR`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`, and on Windows `SYSTEMROOT`/`USERPROFILE`/`APPDATA`/`LOCALAPPDATA`) plus the account's non-secret `credential_command.env`.
+  - The whole process tree is bounded by `L-14`: on POSIX `start_new_session=True` (which also drops the controlling TTY) and `killpg` on timeout; on Windows an own `ctypes` job object with kill-on-close. Both pipes are read by reader threads under the same deadline, never via `communicate()` after a kill, so a grandchild holding stdout cannot block. Output is capped at `L-22`; stderr is summarised, never logged verbatim.
+  - Closing stdin does not stop a pinentry: gpg-agent spawns it outside this process tree. The `pass` recipe therefore sets `PASSWORD_STORE_GPG_OPTS = "--pinentry-mode=error"`, so a locked key fails at once (to be verified, §10 item 7).
 - The `command` argv lives in the config, so write access to the config means code execution as the user. That is the same-user boundary SECURITY.md places out of scope; `doctor` prints the configured argv so a change is visible.
 - No env-var backend (it would end up in client config `env`, R§8). Tests inject an in-memory backend through the same protocol.
 
-On WSL, `setup` detects that no usable keyring exists and proposes `command` with a `pass` recipe (the recommendation, see §11 Open decisions). `doctor` reports the backend in use, whether it is secure, and the result of a timed lookup (found / not found / locked / timeout) without printing the secret.
+On WSL, `setup` detects that no usable keyring exists and proposes `command` with a `pass` recipe (the recommended default, pending Checkpoint 1 and spike V3; §11). `doctor` reports the backend in use, whether it is secure, and the result of a timed lookup (found / not found / locked / timeout) without printing the secret.
 
 ### 2.2 Connection layer
 
-- TLS modes: `implicit` and `starttls`. There is no plaintext mode. The context comes from `ssl.create_default_context()` (optionally `cafile=` from `ca_file`), with a TLS 1.2 minimum and hostname checking on. No option disables verification (R§9).
-- STARTTLS: refuse if not advertised, and discard all pre-TLS capabilities after the upgrade (T-07).
+- TLS modes: `implicit` and `starttls`. There is no plaintext mode. The context comes from `ssl.create_default_context()`; `ca_file` is then added with `load_verify_locations()`, so it extends the system store instead of replacing it (passing `cafile=` to `create_default_context` would skip the system store). TLS 1.2 minimum, hostname checking on. No option disables verification (R§9).
+- STARTTLS: refuse if not advertised, discard all pre-TLS capabilities after the upgrade, and treat bytes buffered before the handshake as a protocol error (T-07). imaplib's `starttls()` drops such bytes silently, so detecting them needs the hook of §10 item 1.
 - Capabilities are parsed once per connection into flags (`SORT`, `THREAD=REFERENCES`, `UIDPLUS`, `CONDSTORE`, `SPECIAL-USE`, `LOGINDISABLED`, `IDLE`, `ESEARCH`), and the query layer branches on them (R§11).
 - IDLE later: sessions are created by a `SessionFactory`, and `ReadOnlySession` has no state tied to request handling, so a future `IdleWatcher` opens its own dedicated connection per account with the same factory and pushes events through a callback interface. The command connection is never shared with IDLE.
-- Reconnect: a dropped connection is re-opened once per tool call. An authentication failure is terminal for the process lifetime of that account until the config or secret changes (no lockout).
+- Reconnect: a dropped connection is re-opened once per tool call. An authentication failure sets the persistent marker (§2 `auth/` row), so no process retries it.
+- Deadline (`L-13`): a worker thread running synchronous imapclient cannot be cancelled, so when the deadline fires the caller shuts the session socket down (`shutdown(SHUT_RDWR)`). The blocked read fails, the worker unwinds and releases the per-account lock, and the session is discarded. A fake-server test stalls mid-literal and asserts that the next call on that account succeeds.
 
 ### 2.3 MCP tool layer
 
 - Tools: R§3 table. Every tool takes `account` (optional only when exactly one account exists or `default_account` is set). Messages are addressed by an opaque `message_ref` = `account:folder:uidvalidity:uid` (base64url). A ref whose account or UIDVALIDITY does not match is rejected (T-14).
-- Annotations: `read_only_hint=True`, `open_world_hint=True` (the content comes from arbitrary senders), plus `title`. Hints are not security: enforcement is §6.
-- Structured output: each tool returns a pydantic model. Mail-derived strings are typed `Untrusted` fields (§2.4). Errors are `ToolError` with a typed code (`not_configured`, `not_found`, `limit_exceeded`, `auth_failed`, `backend_unavailable`, `timeout`, `server_error`) and never include a secret or raw server text beyond a capped, wrapped excerpt.
+- Annotations (`ToolAnnotations` field names verified, survey): `read_only_hint=True`, `open_world_hint=True` (recommended, §11: the content comes from arbitrary senders), plus `title`. Hints are not security: enforcement is §6.
+- Output: each tool builds a `CallToolResult` explicitly, with `structured_content` from its pydantic output model and `content` set to the delimited text rendering (§2.4), instead of the SDK's default JSON rendering of the model (SDK behaviour per the survey). Mail-derived strings are typed `Untrusted` fields.
+- Size (`L-19`): the bound is the sum of both channels, counted as UTF-8 bytes of the serialized `structured_content` plus the text content. On breach the body, then attachment text, is trimmed in both channels alike, with a `limit_exceeded` note naming L-19. Test: a CJK/emoji body at `L-03`.
+- Errors: raised as `ToolError` (v2, `mcp.server.mcpserver.exceptions`), which the SDK turns into an `is_error=True` result whose text the model reads; `structured_content` is empty on errors, so the typed code leads the text (`[not_configured] …`). Codes: `not_configured`, `not_found`, `limit_exceeded`, `auth_failed`, `backend_unavailable`, `timeout`, `server_error`. `MCPError` (a protocol error the model never sees) is not used for tool failures. Error texts contain no secret and no mail-derived string.
 - Server `instructions` state that all mail content is untrusted data and never instructions.
 
 ### 2.4 Untrusted-content envelope
@@ -67,7 +73,15 @@ On WSL, `setup` detects that no usable keyring exists and proposes `command` wit
 Every string that originates from a message or the server (subject, addresses and display names, body, header values, attachment names and text, folder names) is emitted as:
 
 - structured: `{"untrusted": true, "kind": "body", "text": "…", "truncated": false, "notes": [...]}`;
-- text content: `<<<MAILFERRET_UNTRUSTED kind=body id=<nonce>>>> … <<<END_UNTRUSTED id=<nonce>>>>`, with a per-response random nonce. Any occurrence of the delimiter prefix inside the content is escaped, so a mail cannot close the block.
+- text content, for example with the nonce `9f2c41d07ab3`:
+
+  ```
+  <<<MAILFERRET_UNTRUSTED kind=body id=9f2c41d07ab3>>>
+  …mail text…
+  <<<END_UNTRUSTED id=9f2c41d07ab3>>>
+  ```
+
+  Escaping is the guarantee: inside the content, every `<` that is followed by `<<` becomes `‹` (U+2039), so no run of three `<` survives and the content cannot open or close a block, whatever nonce it guesses. The nonce (96 random bits per response) only pairs opening and closing lines for the reader.
 
 Before wrapping, `content/` removes bidi overrides and isolates, zero-width characters and other `Cf` controls, plus HTML hidden content (`display:none`, `visibility:hidden`, `hidden`, zero font size, comments, `<head>`, `<script>`, `<style>`), and records what it removed in `notes`.
 
@@ -88,17 +102,27 @@ They stay unreachable because:
 
 Future design (out of scope now, R§4): `mailferret.write` builds a separate `WriteSession` from its own guard allowlist, and is imported only by `server/write_tools.py`, which is loaded only when an account has `write.enabled = true`. Every write tool takes `confirm: Literal[True]`, sets `read_only_hint=False` and `destructive_hint` per operation, and requires UIDPLUS for move/expunge (`UID EXPUNGE` only, never session-wide EXPUNGE). `mailferret.smtp` is draft-first: `create_draft` returns a draft id and only a separately confirmed `send_draft` sends.
 
+### 2.6 Search post-filters
+
+The alias and has-attachment filters cannot be fully expressed in IMAP SEARCH, so they post-filter a bounded candidate set:
+
+- Candidates: the server-side SEARCH result (other criteria, plus a prefilter) ordered newest first (SORT if advertised, else UID descending), cut at the `L-15` candidate ceiling.
+- Alias prefilter: an exact alias adds `OR HEADER <name> <alias>` over the account's `header_priority`; a wildcard adds the same for its longest literal fragment (at least 3 characters, else no prefilter).
+- Fetch: batched `UID FETCH <set> (BODY.PEEK[HEADER.FIELDS (<header_priority>)])` for aliases, and `BODYSTRUCTURE` for has-attachment, in batches of `L-25` UIDs.
+- Glob syntax: `*` and `?` over the whole lower-cased address (`shop-*@example.com`); no character classes.
+- Bounds: the scan stops at the candidate ceiling or when `L-13` is near; either sets `truncated: true`, so "no match" is never reported for an incomplete scan. Input bounds: pattern length and search-text length `L-23`, criteria count `L-24`.
+
 ## 3. Data flow: `get_message`
 
 1. **MCP** `get_message(account, message_ref, max_chars?)` arrives over stdio. pydantic validates the input. `max_chars` is clamped to `≤ L-03`.
 2. **server** decodes the `message_ref` and checks that its account equals the `account` argument. It takes the per-account lock and runs the rest in a worker thread, under a whole-call deadline (`L-13`).
-3. **imap** reuses or opens the session: TCP connect (`L-11`) → TLS verify → CAPABILITY → `auth/` (LOGINDISABLED check → `credentials/` get → LOGIN; secret added to the redaction set, local reference dropped) → CAPABILITY again.
+3. **imap** reuses or opens the session: TCP connect (`L-11`) → TLS verify → CAPABILITY → `auth/` (auth-failed marker check → mechanism choice from the post-TLS capabilities, §2 `auth/` row → `credentials/` get → LOGIN or AUTHENTICATE PLAIN; secret added to the redaction set, local reference dropped) → CAPABILITY again.
 4. **query** `EXAMINE folder` (never SELECT) → compare UIDVALIDITY with the ref → `UID FETCH uid (RFC822.SIZE FLAGS INTERNALDATE BODYSTRUCTURE BODY.PEEK[HEADER])`. The header literal is capped on read (`L-05`).
 5. **content** parses BODYSTRUCTURE into a bounded tree (`L-06` depth, `L-07` parts) and picks the text part (prefer `text/plain`, else `text/html`).
 6. **query** `UID FETCH uid (BODY.PEEK[<section>]<0.L-02>)`. The read side enforces `L-02` regardless of what the server returns (T-08). If BODYSTRUCTURE is unusable, it falls back to `BODY.PEEK[]` only when `RFC822.SIZE ≤ L-01`, otherwise it returns headers plus a `limit_exceeded` note.
 7. **content** decodes the transfer encoding → charset chain → for HTML, strips hidden content and converts to text → removes `Cf` controls → truncates at `max_chars` on a codepoint boundary (an incomplete tail from a partial fetch is dropped by an incremental decoder).
 8. **aliases** resolves the recipient alias if enabled.
-9. **server** builds `MessageResult` (headers, `body: Untrusted`, attachments metadata, `alias`, `truncated`, `notes`), wraps it in the envelope and returns structured plus text content.
+9. **server** builds `MessageResult` (headers, `body: Untrusted`, attachments metadata, `alias`, `truncated`, `notes`), wraps it in the envelope and returns a `CallToolResult` with both channels, bounded by `L-19`.
 
 `\Seen` is never set (EXAMINE + PEEK only, R§11). This is asserted against GreenMail.
 
@@ -119,13 +143,13 @@ Future design (out of scope now, R§4): `mailferret.write` builds a separate `Wr
 | | Linux | WSL2 | Windows native | macOS |
 |---|---|---|---|---|
 | Config dir | XDG config | XDG config (Linux side) | `%APPDATA%\mailferret` | `~/Library/Application Support/mailferret` |
-| Default credential backend | Secret Service via `keyring` | `command` (`pass` recipe); Secret Service if `doctor` finds a working one | Windows Credential Locker | Keychain |
+| Default credential backend | Secret Service via `keyring` | recommended, pending Checkpoint 1: `command` (`pass` recipe); Secret Service if `doctor` finds a working one | Windows Credential Locker | Keychain |
 | `register claude-code` | yes | yes | yes | yes |
-| `register claude-desktop` | not targeted | writes the Windows-side config: launch via `wsl.exe -d <distro> -- <abs uvx> …` | regular and MSIX config paths | yes |
+| `register claude-desktop` | not targeted | writes the Windows-side config: launch via absolute `wsl.exe … --exec <abs uvx> …` (§9.6) | regular and MSIX config paths (unverified, §10 item 21) | yes |
 | Plugin | yes | yes | yes (needs `uvx` on the client PATH) | yes |
 | Plugin in Cowork | unverified (§10 item 14) | unverified | unverified | unverified |
 | CI unit tests | yes | covered by Linux, plus WSL detection unit tests with a faked `/proc` | yes | yes |
-| CI GreenMail integration | yes | — | — (Linux runners only, by decision) | — (Linux runners only, by decision) |
+| CI GreenMail integration | yes | — | — (Linux runners only; recommended, §11) | — (Linux runners only; recommended, §11) |
 
 ## 6. Read-only enforcement in the server
 
@@ -146,9 +170,9 @@ Location per R§6, override with `MAILFERRET_CONFIG` or `--config`. Account ids 
 schema_version = 1
 default_account = "work"            # optional
 
-[limits]                            # optional; may only lower the built-in ceilings (SECURITY.md §5)
-max_body_chars = 50000
-max_results = 100
+[limits]                            # optional; keys and ceilings in SECURITY.md §5; values may only lower them
+max_body_chars = 50000              # L-03
+max_page_size = 100                 # L-15
 
 [accounts.work]
 preset = "generic"
@@ -157,7 +181,7 @@ port = 993
 tls = "implicit"                    # implicit | starttls
 login = "user@example.com"
 credential_backend = "keyring"      # keyring | command
-# ca_file = "/path/to/ca.pem"       # extra trust anchor; verification stays on
+# ca_file = "/path/to/ca.pem"       # added to the system trust store; verification stays on
 
 [accounts.work.aliases]
 domains = ["example.com"]
@@ -172,6 +196,7 @@ credential_backend = "command"
 [accounts.shop.credential_command]
 get = ["/usr/bin/pass", "show", "mailferret/shop"]
 set = ["/usr/bin/pass", "insert", "--multiline", "--force", "mailferret/shop"]
+env = { PASSWORD_STORE_GPG_OPTS = "--pinentry-mode=error" }   # non-secret only
 
 # Reserved, rejected when enabled in this version:
 # [accounts.work.write]  enabled = false
@@ -180,24 +205,7 @@ set = ["/usr/bin/pass", "insert", "--multiline", "--force", "mailferret/shop"]
 
 ## 8. Dependencies
 
-Snapshot of PyPI at design time (release date of the listed version). Policy and vetting: `docs/research/library-survey.md`, R§10.
-
-| Package | Role | Version | Released | License |
-|---|---|---|---|---|
-| mcp | MCP SDK v2 (`from mcp.server import MCPServer`), pinned `>=2.3,<3` | 2.3.0 | 2026-10-02 | MIT |
-| imapclient | IMAP | 4.3.0 | 2026-11-17 | BSD-3 |
-| inscriptis (+ lxml) | HTML → text | 2.7.7 (lxml 6.1.3) | 2026-11-19 (2026-09-02) | Apache-2.0 (BSD-3) |
-| pypdf | PDF text, no extras | 7.2.0 | 2026-11-26 | BSD-3 |
-| keyring | platform credential stores | 25.7.0 | 2025-11-16 | MIT |
-| platformdirs | config paths | 4.14.8 | 2026-11-20 | MIT |
-| click | CLI | 8.5.1 | 2026-11-06 | BSD-3 |
-| pydantic | config and output models (already via mcp) | 2.14.4 | 2026-11-19 | MIT |
-| tomlkit | TOML write (read: stdlib `tomllib`) | 0.15.3 | 2026-11-24 | MIT |
-| ruff (dev) | lint/format | 0.17.6 | 2026-11-19 | MIT |
-| mypy (dev) | `--strict` | 2.4.1 | 2026-10-28 | MIT |
-| pytest (dev) | tests | 9.2.0 | 2026-10-27 | MIT |
-| GreenMail (test, Docker) | IMAP server | 2.1.15 | not recorded | Apache-2.0 |
-| uv (launcher) | `uvx --from` | 0.13.10 | 2026-11-24 | MIT / Apache-2.0 |
+Choices, versions, release dates and vetting live in `docs/research/library-survey.md` (one dated snapshot, the only copy). Runtime: `mcp` (v2, `>=2.3,<3`), `imapclient`, `inscriptis` (+ `lxml`), `pypdf` (no extras), `keyring` (+ its vetted platform transitives), `platformdirs`, `click`, `pydantic`, `tomlkit`. Dev: `ruff`, `mypy`, `pytest`; GreenMail in Docker; `uv` as the launcher. No dependency outside the survey's vetted table (R§10, SECURITY §6).
 
 Python floor `>=3.11`. Rejected: fastmcp, aioimaplib, html2text, pymupdf, tomli-w, keyrings.alt (survey). Not added: charset detection libraries (the stdlib fallback chain is enough, R§11), justhtml (optional fallback only if inscriptis fails vetting later).
 
@@ -228,8 +236,8 @@ The plugin lives in `plugin/` rather than the repo root. With `source: "./"` the
 {"mcpServers": {"mailferret": {"command": "uvx", "args": ["--constraints", "${CLAUDE_PLUGIN_ROOT}/constraints.txt", "--from", "mailferret==X.Y.Z", "mailferret", "serve"]}}}
 ```
 
-- The exact pin is required, so a cached older version is never served silently. `--from pkg==ver cmd` is the documented uvx form (survey); the shorter `uvx pkg==ver` is not relied on.
-- `--constraints`: uvx ignores `uv.lock`, so without it plugin users would resolve unlocked transitive dependencies (the large `mcp` tree included) at install time. The constraints file is generated with `uv export` from the lock of the pinned release, so users run the exact set CI tested and the audit scanned. Chosen over `--exclude-newer`: a date cutoff still resolves versions CI never saw and cannot be audited as a list. Cost: transitive fixes reach users only through a mailferret release, so the scheduled audit runs against the shipped constraints file (T-13).
+- The exact pin is required: it keeps the server, the constraints file and the plugin version in lockstep, and it rules out uvx serving a cached older version (that uvx behaviour is the plugin spec's *inference*, not verified). `--from pkg==ver cmd` is the documented uvx form (survey); the shorter `uvx pkg==ver` is not relied on.
+- `--constraints`: uvx ignores `uv.lock`, so without it plugin users would resolve unlocked transitive dependencies (the large `mcp` tree included) at install time. The constraints file is generated with `uv export` from the lock of the pinned release, so users would run the exact set CI tested and the audit scanned. Two facts behind this are unverified (§10 item 16): that `--constraints` applies to the uvx tool environment, and that `${CLAUDE_PLUGIN_ROOT}` expands inside `args`. Fallback: `--exclude-newer <release timestamp>`, which bounds but does not pin the set (SECURITY T-13 residual). Chosen over `--exclude-newer`: a date cutoff still resolves versions CI never saw and cannot be audited as a list. Cost: transitive fixes reach users only through a mailferret release, so the scheduled audit runs against the shipped constraints file (T-13).
 - No `env`, no `userConfig`: the server reads its own config file. Cowork ignores servers whose options have no default, and an unset `${…}` stays literal. Evals inject their fixture config through `MAILFERRET_CONFIG` in the inherited environment; only if MCP servers do not inherit it does `.mcp.json` gain `"env": {"MAILFERRET_CONFIG": "${MAILFERRET_CONFIG:-}"}`, which needs `${VAR:-default}` support (§10 item 15). The server treats an empty value as unset.
 - Tool names: `mcp__plugin_mailferret_mailferret__<tool>`. The agent and skill use these names, enumerated.
 - **The absolute-path gap (R§11).** `.mcp.json` cannot carry an absolute `uvx` path, so a missing launcher on the client PATH is a silent start failure. No mailferret process can observe the client's PATH from outside it. The coverage is the `doctor` skill (§9.7), whose ground truth is whether the mailferret tools are present in the session. The README covers putting `uvx` on the PATH the client inherits, per platform.
@@ -256,21 +264,28 @@ There is no setup skill. A secret must never pass through the model, so the guar
 
 A manual `register claude-code` entry named `mailferret` outranks the plugin server, and it changes the tool names from `mcp__plugin_mailferret_mailferret__*` to `mcp__mailferret__*`. That silently breaks the plugin agent's `tools` allowlist and the skill's pre-approval. Policy:
 
-- The plugin is the recommended Claude Code path. `register claude-code` detects an installed mailferret plugin and refuses unless `--force`. Both the refusal and the `--force` path print what breaks and the exact command to disable or uninstall the plugin (`claude plugin disable mailferret@<marketplace>` / `claude plugin uninstall …`, forms verified in §10 item 20).
+- The plugin is the recommended Claude Code path. `register claude-code` detects an installed mailferret plugin and refuses unless `--force`. Both the refusal and the `--force` path print what breaks and the exact command to disable or uninstall the plugin (`claude plugin disable mailferret@<marketplace>` / `claude plugin uninstall …`, forms to be verified in §10 item 20).
 - Plugin detection only sees the scopes visible from the current directory (user scope, and project/local scope of the current project), so a plugin enabled in another project is not seen. The message says so.
 - Reverse order (the plugin installed after a manual entry): `mailferret doctor` lists every registration it can see, and the `doctor` skill detects shadowing from inside the session (`mcp__mailferret__*` present, `mcp__plugin_mailferret_mailferret__*` absent) and gives the `claude mcp remove` command for the manual entry.
 
-`register claude-code` mechanism: it runs `claude mcp add-json --scope <user|project|local> mailferret '<json>'` through the absolute path of the `claude` CLI, so Claude Code owns its file format and locking. The JSON names the absolute `uvx` path, the constraints file and the running mailferret version. It never edits Claude Code's state files directly. Without the CLI it falls back to `--print`. The exact `claude mcp` flags are a verification item (§10).
+`register claude-code` mechanism: it runs `claude mcp add-json --scope <user|project|local> mailferret '<json>'` through the absolute path of the `claude` CLI, so Claude Code owns its file format and locking. Before invoking it, `register` backs up the file that scope writes (the user state file for user/local scope, the project `.mcp.json` for project scope; exact files per §10 item 13) with the same timestamped, 0600 rule as direct writes (R§8, T-12). It never edits Claude Code's state files itself. Without the CLI it falls back to `--print`.
+
+Launcher selection (all `register` targets):
+1. `uvx` found and the running version is a release on PyPI (checked with a timeout) → `<abs uvx> --constraints <abs constraints> --from mailferret==<version> mailferret serve`.
+2. Otherwise, if the running `mailferret` executable lives in a persistent environment (a `pipx`/`uv tool` install or a venv, not the uv cache) → `<abs mailferret> serve`. This covers `pipx` without uv and editable/dev installs.
+3. Otherwise refuse; only `--print` is allowed.
+
+`mailferret doctor` checks every visible registration (plugin, Claude Code scopes, Desktop): that its absolute launcher and constraints paths exist and are executable or readable, including the Linux-side `uvx` inside a `wsl.exe` Desktop entry. It cannot see the client's PATH itself (§9.2).
 
 ### 9.6 Claude Desktop
 
-Primary: `mailferret register claude-desktop` (backup, then an atomic merge into `claude_desktop_config.json`; `--print` shows the snippet only). Paths: macOS Application Support; Windows regular `%APPDATA%\Claude`; Windows MSIX `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude` (the package family suffix is globbed, never hard-coded). From WSL it looks for those paths under `/mnt/<drive>/Users/*/` without running Windows binaries. If not exactly one candidate is found it requires `--desktop-config <path>`. The command is `wsl.exe -d <distro> -- <absolute uvx path> --constraints <absolute constraints path> --from mailferret==X.Y.Z mailferret serve` (distro from `WSL_DISTRO_NAME`).
+Primary: `mailferret register claude-desktop` (backup, then an atomic merge into `claude_desktop_config.json`; `--print` shows the snippet only). Paths (unverified, §10 item 21): macOS Application Support; Windows regular `%APPDATA%\Claude`; Windows MSIX `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude` (the package family suffix is globbed, never hard-coded). From WSL it looks for those paths under `/mnt/<drive>/Users/*/` without running Windows binaries. If not exactly one candidate is found it requires `--desktop-config <path>`. The entry is `command` = the absolute Windows path of `wsl.exe` (found under the drive mount, converted with `wslpath -w`), `args` = `-d <distro> -u <user> --exec <absolute uvx path> --constraints <absolute constraints path> --from mailferret==X.Y.Z mailferret serve`, one JSON array element per argument. `--exec` runs the program without the distro's default shell, so nothing is re-parsed; `-u` names the user that owns the `uvx` path; distro from `WSL_DISTRO_NAME`. Argument passing, `--exec` and a path containing a space are §10 item 22.
 
 `.mcpb`: deferred. The manifest format supports `server.type: "uv"`, but host support in Desktop is unverified (§10). If verified, ship an `.mcpb` with no `sensitive` user_config (keyring stays the source of truth, §9.3).
 
 ### 9.7 Plugin components
 
-The adversarial review is done; these verdicts are decided. The baseline: the MCP tool descriptions and input schemas already explain each tool, so a component must add something the server cannot. Rejected rows stay as a record.
+The adversarial review is done and its verdicts were accepted; they are not a Checkpoint 1 item. The baseline: the MCP tool descriptions and input schemas already explain each tool, so a component must add something the server cannot. Rejected rows stay as a record.
 
 | Name | Type | Verdict | Design / decisive reason |
 |---|---|---|---|
@@ -286,7 +301,7 @@ The adversarial review is done; these verdicts are decided. The baseline: the MC
 | `injection-scan` | hook (PostToolUse) | reject | Heuristic with false negatives that fails open; it would suggest a protection it cannot provide |
 
 **`mail-reader` agent.**
-- `tools`: the scoped read tools enumerated by name (`list_accounts`, `list_folders`, `search`, `get_message`, `get_thread`, `list_attachments`, `get_attachment_text`, `list_aliases`), with no wildcard, so a future write tool is never granted by accident. No Bash, web, file, Skill or Agent tools (verify that an allowlist excludes the last two, §10 item 18). No `skills` preload. A `maxTurns` cap.
+- `tools`: the scoped read tools enumerated by name (`list_accounts`, `list_folders`, `search`, `get_message`, `get_thread`, `list_attachments`, `get_attachment_text`, `list_aliases`), with no wildcard, so a future write tool is never granted by accident. No Bash, web, file, Skill or Agent tools (that an allowlist excludes the last two is §10 item 18; fallback `disallowedTools`). No `skills` preload. A `maxTurns` cap.
 - A CI test asserts that the agent's `tools` list equals the server's registered read tools, prefixed with the plugin scope.
 - If its tools are missing (manual-registration shadowing, §9.5, or the server not running), it stops and reports that, with a pointer to the `doctor` skill, instead of summarizing from nothing.
 - Body: the call order and bounds (accounts → folders → `search` with an explicit page size → `get_message` only for the messages it needs, honouring `truncated`), and the rule that mail content is data.
@@ -301,39 +316,40 @@ The adversarial review is done; these verdicts are decided. The baseline: the MC
 
 ## 10. To verify in Phase 2
 
-Each item is a research spike (`docs/PLAN.md` phase 2a). The design names a fallback for each.
+Each item belongs to a spike in `docs/PLAN.md` phase 2a (V1–V4) and names the fallback the design uses if the check fails.
 
-1. The imapclient/imaplib hook point for the command guard and the read-side literal cap (fallback: wrap at the socket-file level in the `IMAP4` subclass imapclient uses).
-2. Whether imapclient exposes ESEARCH (`RETURN (COUNT MIN MAX)`); the design does not depend on it.
-3. Which capabilities GreenMail advertises (SORT, THREAD, CONDSTORE, UIDPLUS, STARTTLS, SPECIAL-USE). Branches it lacks are covered by the scripted fake server.
-4. The text content the SDK emits next to structured output, and whether the envelope delimiters survive in both.
-5. Whether Claude Desktop runs `.mcpb` `server.type: "uv"` on Windows, macOS, and via WSL.
-6. How `register` detects an installed plugin (e.g. `claude plugin list --json`, or the plugin install record), and that a same-name user server really shadows the plugin server.
-7. Headless unlock behaviour from a client- or `wsl.exe`-launched process: `pass`/gpg-agent with an expired cache and closed stdin (fails fast?), and Secret Service bus discovery without `DBUS_SESSION_BUS_ADDRESS`.
-8. The Claude Code hook shell on Windows (only relevant if a hook is ever included).
-9. The claude.ai/Cowork installability of a plugin whose root is a subdirectory.
-10. Exact `pypdf` knobs for the stream-length and decompression caps in 7.x.
-11. Whether Claude Code's Bash tool and its MCP server launches inherit the same PATH (the `doctor` skill relies on it).
-12. Whether the Bash tool on Windows (Git Bash) provides `command -v` for the `doctor` skill, or it needs a `where` branch.
-13. The `claude mcp add-json` flags and scopes used by `register claude-code`.
-14. Whether a Cowork plugin's stdio server runs on the host or in the sandbox VM (config, keyring and IMAP egress all depend on it). Until then Cowork is "unverified" in §5.
-15. Whether plugin `.mcp.json` supports `${VAR:-default}`, and whether MCP servers inherit Claude Code's environment (how evals inject `MAILFERRET_CONFIG`, §9.2).
-16. That `uvx --constraints <file> --from pkg==ver` applies the constraints to the tool environment, and that `${CLAUDE_PLUGIN_ROOT}` expands inside `args`.
-17. Whether skill `allowed-tools` Bash patterns may contain `${CLAUDE_PLUGIN_ROOT}`; if not, the `doctor` skill pre-approves only step 2 and step 3 prompts.
-18. That an agent `tools` allowlist excludes the Skill and Agent tools.
-19. That Claude Code sets `CLAUDECODE=1` in its Bash tool environment (the `--stdin` refusal, §9.3).
-20. Whether `claude plugin eval` accepts an evals directory outside the plugin root, what the plugin cache copies, and the exact `claude plugin disable` / `uninstall` forms.
+1. The imapclient/imaplib hook point for the command guard, the read-side literal and line caps, and detecting bytes buffered before the STARTTLS handshake. Fallback: an own `IMAP4` subclass wrapping the socket file; for STARTTLS, a `MSG_PEEK` check on the raw socket before wrapping.
+2. Whether imapclient exposes ESEARCH (`RETURN (COUNT MIN MAX)`). Fallback: plain `UID SEARCH`; the design does not depend on it.
+3. Which capabilities GreenMail advertises (SORT, THREAD, CONDSTORE, UIDPLUS, STARTTLS, SPECIAL-USE). Fallback: the scripted fake server covers missing branches.
+4. Resolved at design time (survey): `ToolError` semantics, the annotation field names, and that a pydantic return fills both channels. Remaining: that a `CallToolResult` returned from an `MCPServer` tool with an output model keeps our text content unchanged. Fallback: register the tools through the low-level server API.
+5. Whether Claude Desktop runs `.mcpb` `server.type: "uv"` on Windows, macOS, and via WSL. Fallback: `register claude-desktop` only.
+6. How `register` detects an installed plugin (e.g. `claude plugin list --json`, or the install record), and that a same-name user server really shadows the plugin server. Fallback: `register` warns without refusing, and the `doctor` skill detects shadowing in-session.
+7. Headless credential behaviour from a client- or `wsl.exe`-launched process: `pass` with an expired agent cache under `--pinentry-mode=error`; a grandchild holding stdout past `L-14`; Secret Service bus discovery without `DBUS_SESSION_BUS_ADDRESS`. Fallback: document a long gpg-agent cache TTL, and `doctor` reports `locked`.
+8. Dropped: no hook ships (§9.7).
+9. Installability on claude.ai/Cowork of a plugin whose root is a subdirectory. Fallback: Cowork stays unsupported.
+10. `pypdf` 7.x knobs for the stream-length and decompression caps, and the worker memory cap per OS: Linux `RLIMIT_AS`; macOS does not enforce `RLIMIT_AS`; Windows needs an own `ctypes` job object with a process memory limit. Fallback: on macOS (and Windows, if the job object fails) the bound is wall time plus the page and decompressed-bytes caps, and SECURITY T-06 scopes the memory guarantee accordingly.
+11. Whether Claude Code's Bash tool and its MCP server launches get the same PATH. Fallback: the `doctor` skill already treats a `uvx` hit as inconclusive.
+12. Whether the Bash tool on Windows (Git Bash) provides `command -v`. Fallback: a `where uvx` branch.
+13. The `claude mcp add-json` flags and scopes, and which file each scope writes (for the backup). Fallback: `--print` only.
+14. Whether a Cowork plugin's stdio server runs on the host or in the sandbox VM (config, keyring and IMAP egress all depend on it). Until then Cowork is "unverified" in §5. Fallback: Cowork unsupported.
+15. Whether plugin `.mcp.json` supports `${VAR:-default}`, and whether MCP servers inherit Claude Code's environment (how evals inject `MAILFERRET_CONFIG`). Fallback: the eval harness writes a test copy of the plugin with a literal config path.
+16. That `uvx --constraints <file> --from pkg==ver` applies the constraints to the tool environment, and that `${CLAUDE_PLUGIN_ROOT}` expands inside `args`. Fallback: `--exclude-newer <release timestamp>` (§9.2).
+17. Whether skill `allowed-tools` Bash patterns may contain `${CLAUDE_PLUGIN_ROOT}`. Fallback: the `doctor` skill's step 3 prompts.
+18. That an agent `tools` allowlist excludes the Skill and Agent tools. Fallback: list them in `disallowedTools`.
+19. That Claude Code sets `CLAUDECODE=1` in its Bash tool environment. Fallback: the TTY rule alone guards `auth set`; the `--stdin` refusal is then documented as best effort.
+20. Whether `claude plugin eval` accepts an evals directory outside the plugin root, what the plugin cache copies, and the exact `claude plugin disable` / `uninstall` forms. Fallback: evals in `plugin/evals/` with benign fixtures only; the refusal message points to the `/plugin` UI.
+21. The Claude Desktop config paths (regular, MSIX with the `Claude_*` glob, macOS) on real installs. Fallback: `--desktop-config <path>` becomes mandatory on that platform.
+22. `wsl.exe --exec` argument passing (no default-shell re-parsing), `-u <user>`, and a path containing a space. Fallback: a generated Linux-side launcher script at a space-free absolute path, run via `--exec`.
 
 ## 11. Open decisions (Checkpoint 1)
 
 | Decision | Recommendation | Why |
 |---|---|---|
 | License | MIT | Matches every runtime dependency's permissive license; simplest for reuse |
-| WSL credential backend | Default: the `command` backend with a documented `pass` recipe (GPG-encrypted at rest, no D-Bus, works under `wsl.exe` launch). Fallback: `keyring` Secret Service when `doctor` finds a working, unlocked one (e.g. gnome-keyring or KeePassXC under WSLg) | See below |
+| WSL credential backend | Recommended default (pending this checkpoint and spike V3): the `command` backend with a documented `pass` recipe (GPG-encrypted at rest, no D-Bus, works under `wsl.exe` launch). Fallback: `keyring` Secret Service when `doctor` finds a working, unlocked one (e.g. gnome-keyring or KeePassXC under WSLg) | See below |
 | Desktop distribution | `register claude-desktop` now; `.mcpb` only after item 5 of §10 is verified | Format support is documented, host support is not |
 | Plugin root | `plugin/` subdirectory | Keeps tests and fixtures out of plugin caches (§9.1) |
 | Plugin `userConfig` | None | Single source of truth (§9.3) |
-| Plugin components | `mail-reader` agent and `doctor` skill only | Adversarial review verdicts (§9.7) |
 | Plugin dependency locking | `uvx --constraints` with a generated file | Exact, audited transitive set; `--exclude-newer` is not a list (§9.2) |
 | LICENSE copyright holder | The GitHub handle (`<owner>`), not a legal name | Minimises personal data in the repo; the handle already identifies the publisher |
 | `open_world_hint` | `True` | Content comes from arbitrary senders; clients should treat the output as external |
@@ -344,9 +360,9 @@ WSL options, scored against the constraints (headless stdio child, a locked stor
 | Option | Headless fit | Locked → fails fast | `auth set` works | New dep | Verdict |
 |---|---|---|---|---|---|
 | Secret Service via gnome-keyring under WSLg | needs a session bus, a running daemon and an unlocked collection; none is guaranteed under `wsl.exe` launch | the unlock prompt may hang or pop up a window | yes | none (`keyring` → `secretstorage`/`jeepney`) | fallback, when detected working |
-| `pass`/GPG via the `command` backend | gpg-agent starts on demand, no bus | yes, with stdin closed and a timeout (verify item 7) | yes, via `set` argv | none in Python; `pass` + `gnupg` are distro packages | **default** |
+| `pass`/GPG via the `command` backend | gpg-agent starts on demand, no bus | expected with `--pinentry-mode=error` plus the process-tree timeout (§10 item 7) | yes, via `set` argv | none in Python; `pass` + `gnupg` are distro packages | **recommended default** |
 | Windows Credential Manager via interop | breaks when interop is disabled or PATH ordering changes; `cmdkey` cannot read secrets, so it needs a PowerShell P/Invoke script | the PowerShell startup cost is paid on every call | needs a second script | none, but a fragile Windows-side script | reject as built-in; a user may wire it through `command` at their own risk |
 | Encrypted file + passphrase | the passphrase must still reach a headless process, so the problem only moves | — | yes | crypto code to own | reject |
-| Env var / command fallback | env ends up in client `env` (R§8) and `/proc/<pid>/environ` | — | no | none | env: reject; command: this is the default above |
+| Env var / command fallback | env ends up in client `env` (R§8) and `/proc/<pid>/environ` | — | no | none | env: reject; command: this is the recommended default above |
 
 `doctor` reports: backend type and class; `secure: yes/no`; WSL detected; for `command`, the resolved absolute path and a timed lookup result (`found`, `not_found`, `locked`, `timeout`); for `keyring` on WSL, bus reachability and collection lock state.
