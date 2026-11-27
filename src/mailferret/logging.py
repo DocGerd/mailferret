@@ -7,6 +7,7 @@ import sys
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
 
 REDACTED = "***"
 _SAFE_VALUE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
@@ -43,15 +44,9 @@ def redact(text: str) -> str:
     """Replace registered secret forms, and whole LOGIN/AUTHENTICATE lines."""
     with _lock:
         forms = sorted(_secret_forms, key=len, reverse=True)
-    lines = []
-    for line in text.split("\n"):
-        if _COMMAND_LINE.search(line):
-            line = REDACTED
-        else:
-            for form in forms:
-                line = line.replace(form, REDACTED)
-        lines.append(line)
-    return "\n".join(lines)
+    for form in forms:
+        text = text.replace(form, REDACTED)
+    return "\n".join(REDACTED if _COMMAND_LINE.search(line) else line for line in text.split("\n"))
 
 
 @contextmanager
@@ -79,6 +74,27 @@ class RedactionFilter(logging.Filter):
         record.exc_text = None
         record.stack_info = None
         return True
+
+
+_factory_marker = "_mailferret_redacting"
+
+
+def _install_record_factory() -> None:
+    """Redact at record creation so no logger, configured or not, can emit a raw secret."""
+    previous = logging.getLogRecordFactory()
+    if getattr(previous, _factory_marker, False):
+        return
+
+    def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = previous(*args, **kwargs)
+        RedactionFilter().filter(record)
+        return record
+
+    setattr(factory, _factory_marker, True)
+    logging.setLogRecordFactory(factory)
+
+
+_install_record_factory()
 
 
 def event(

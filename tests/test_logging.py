@@ -87,3 +87,17 @@ def test_imapclient_logger_pinned(capfd: pytest.CaptureFixture[str]) -> None:
     out, err = capfd.readouterr()
     assert (out, err) == ("", "")
     assert logging.getLogger("imapclient").propagate is False
+
+
+def test_redaction_without_configure(caplog: pytest.LogCaptureFixture) -> None:
+    mflog.register_secret(SECRET, LOGIN)
+    caplog.set_level(logging.DEBUG)
+    logging.getLogger("mailferret.child").error("x %s y", SECRET)
+    logging.getLogger("other").error("x %s y", SECRET)
+    assert SECRET not in caplog.text
+    assert caplog.text.count("***") == 2
+
+
+def test_secret_split_across_lines_is_redacted() -> None:
+    mflog.register_secret("dummy\nsplit-NOT-REAL", LOGIN)
+    assert "split-NOT-REAL" not in mflog.redact("a dummy\nsplit-NOT-REAL b")
