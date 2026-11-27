@@ -8,10 +8,11 @@
       "Bash(uvx ruff *)",
       "Bash(uv sync *)",
       "Bash(uv lock *)",
-      "Bash(docker compose up *)",
-      "Bash(docker compose down *)",
-      "Bash(docker compose ps *)",
-      "Bash(docker compose logs *)",
+      "Bash(docker compose -f tests/integration/docker-compose.yml up -d)",
+      "Bash(docker compose -f tests/integration/docker-compose.yml up -d --wait)",
+      "Bash(docker compose -f tests/integration/docker-compose.yml down)",
+      "Bash(docker compose -f tests/integration/docker-compose.yml down -v)",
+      "Bash(docker compose -f tests/integration/docker-compose.yml ps)",
       "Bash(git status *)",
       "Bash(git diff *)",
       "Bash(git log *)",
@@ -20,10 +21,12 @@
       "Bash(git branch --show-current)",
       "Bash(git branch --list *)",
       "Bash(git branch -a)",
-      "Bash(git branch -vv)",
-      "Bash(python3 scripts/pii_check.py *)"
+      "Bash(git branch -vv)"
     ],
     "deny": [
+      "Bash(git *--output*)",
+      "Bash(git *--ext-diff*)",
+      "Bash(git *--textconv*)",
       "Read(~/.password-store/**)",
       "Read(~/.gnupg/**)",
       "Read(~/.local/share/keyrings/**)",
@@ -51,7 +54,13 @@
           {
             "type": "command",
             "command": "uv",
-            "args": ["run", "--no-project", "--quiet", "python", "${CLAUDE_PROJECT_DIR}/.claude/hooks/ruff_fix.py"],
+            "args": [
+              "run",
+              "--no-project",
+              "--quiet",
+              "python",
+              "${CLAUDE_PROJECT_DIR}/.claude/hooks/ruff_fix.py"
+            ],
             "timeout": 120
           }
         ]
@@ -63,16 +72,15 @@
         "hooks": [
           {
             "type": "command",
-            "if": "Bash(git *)",
             "command": "uv",
-            "args": ["run", "--no-project", "--quiet", "python", "${CLAUDE_PROJECT_DIR}/.claude/hooks/commit_guard.py", "pii"],
-            "timeout": 150
-          },
-          {
-            "type": "command",
-            "if": "Bash(git *)",
-            "command": "uv",
-            "args": ["run", "--no-project", "--quiet", "python", "${CLAUDE_PROJECT_DIR}/.claude/hooks/commit_guard.py", "tests"],
+            "args": [
+              "run",
+              "--no-project",
+              "--quiet",
+              "python",
+              "${CLAUDE_PROJECT_DIR}/.claude/hooks/commit_guard.py",
+              "all"
+            ],
             "timeout": 600
           }
         ]
