@@ -93,6 +93,7 @@ def test_write_keeps_comments(tmp_path: Path) -> None:
     assert "# keep me" in text
     assert "other" in text
     assert "accounts.work" not in text
+    assert load(path).accounts.keys() == {"other"}
 
 
 def _chain(error: BaseException) -> list[BaseException]:
@@ -210,6 +211,15 @@ def test_write_drops_a_key_set_back_to_its_default(tmp_path: Path) -> None:
     path.write_text(ACCOUNT + 'port = 143\n[accounts.work.aliases]\nplus_separator = "+"\n')
     write(parse(ACCOUNT), path)
     text = path.read_text()
+    assert load(path) == parse(ACCOUNT)
     assert "port" not in text
     assert "plus_separator" not in text
     assert "# keep me" in text
+
+
+def test_ca_file_survives_write_and_load(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    config = parse(ACCOUNT + 'ca_file = "/path/to/ca.pem"\n')
+    write(config, path)
+    assert load(path) == config
+    assert load(path).accounts["work"].ca_file == "/path/to/ca.pem"
