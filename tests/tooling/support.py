@@ -29,6 +29,9 @@ ENV = {
     "GIT_COMMITTER_NAME": "Test",
     "GIT_COMMITTER_EMAIL": "test" + AT + "example.com",
 }
+UV_STUB = r"""#!/bin/sh
+env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p' > "$UV_ENV_OUT"
+"""
 
 
 def run(args: list[str], cwd: Path, stdin: str | None = None, env: dict[str, str] | None = None,
@@ -65,6 +68,17 @@ class RepoCase(unittest.TestCase):
         else:
             path.write_text(content)
         return path
+
+    def uv_stub(self) -> tuple[Path, Path]:
+        """A `uv` on a PATH dir that records the GIT_* names it inherits, never values; and its output file."""
+        stub = self.write("bin/uv", UV_STUB, root=self.tmp)
+        stub.chmod(0o755)
+        out = self.tmp / "uv-env"
+        run([str(stub)], self.tmp, env={**ENV, "UV_ENV_OUT": str(out)}, check=True)
+        self.assertIn("GIT_CONFIG_GLOBAL", out.read_text().split())
+        self.assertNotIn(os.devnull, out.read_text())
+        out.unlink()
+        return stub, out
 
     def scan(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
         return run(["python3", str(SCANNER), *args], cwd or self.repo)

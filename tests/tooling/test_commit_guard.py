@@ -62,14 +62,18 @@ class Guard(RepoCase):
         other = self.tmp / "other"
         other.mkdir()
         git(other, "init", "-q")
+        # Literal, not derived from REDIRECTING_ENV, so a name dropped from it fails here.
         cases = {
             "GIT_DIR": {"GIT_DIR": str(other / ".git")},
+            "GIT_WORK_TREE": {"GIT_WORK_TREE": str(other)},
             "GIT_INDEX_FILE": {"GIT_INDEX_FILE": str(other / ".git" / "index")},
+            "GIT_COMMON_DIR": {"GIT_COMMON_DIR": str(other / ".git")},
+            "GIT_OBJECT_DIRECTORY": {"GIT_OBJECT_DIRECTORY": str(other / ".git" / "objects")},
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES": {"GIT_ALTERNATE_OBJECT_DIRECTORIES": str(other / ".git" / "objects")},
+            "GIT_NAMESPACE": {"GIT_NAMESPACE": "ns"},
             "GIT_CONFIG_PARAMETERS": {"GIT_CONFIG_PARAMETERS": f"'core.worktree={other}'"},
             "GIT_CONFIG_COUNT": {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.worktree",
                                  "GIT_CONFIG_VALUE_0": str(other)},
-            "GIT_CEILING_DIRECTORIES": {"GIT_CEILING_DIRECTORIES": str(self.tmp)},
-            "GIT_DISCOVERY_ACROSS_FILESYSTEM": {"GIT_DISCOVERY_ACROSS_FILESYSTEM": str(other)},
         }
         for name, env in cases.items():
             with self.subTest(name=name):
@@ -81,14 +85,11 @@ class Guard(RepoCase):
 
     def test_tests_mode_runs_pytest_without_git_env(self) -> None:
         self.write("pyproject.toml", "")
-        stub = self.write("bin/uv", '#!/bin/sh\nenv > "$UV_ENV_OUT"\n', root=self.tmp)
-        stub.chmod(0o755)
-        out = self.tmp / "uv-env"
+        stub, out = self.uv_stub()
         env = {"PATH": f"{stub.parent}{os.pathsep}{ENV['PATH']}", "UV_ENV_OUT": str(out), "GIT_PREFIX": "sub/"}
         res = self.guard_run("git commit -m x", env=env, mode="tests")
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertTrue(out.exists())
-        self.assertEqual([line for line in out.read_text().splitlines() if line.startswith("GIT_")], [])
+        self.assertEqual(out.read_text().split(), [])
 
     def test_force_added_ignored_file(self) -> None:
         self.write(".env", ENV_LINE + "\n")

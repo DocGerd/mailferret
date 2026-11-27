@@ -25,9 +25,7 @@ class PreCommit(RepoCase):
     def test_scanner_keeps_git_env_and_tests_drop_it(self) -> None:
         shutil.copytree(REPO / ".githooks", self.repo / ".githooks")
         self.write("pyproject.toml", "")
-        stub = self.write("bin/uv", '#!/bin/sh\nenv > "$UV_ENV_OUT"\n', root=self.tmp)
-        stub.chmod(0o755)
-        out = self.tmp / "uv-env"
+        stub, out = self.uv_stub()
         alt_index = self.tmp / "alt-index"
         shutil.copy(self.repo / ".git" / "index", alt_index)
         self.write("leak.txt", f"{EMAIL}\n")
@@ -41,4 +39,4 @@ class PreCommit(RepoCase):
         self.assertFalse(out.exists())
         res = run(["sh", hook], self.repo, env={**hook_env, "GIT_INDEX_FILE": str(self.repo / ".git" / "index")})
         self.assertEqual(res.returncode, 0, res.stderr)
-        self.assertEqual([line for line in out.read_text().splitlines() if line.startswith("GIT_")], [])
+        self.assertEqual(out.read_text().split(), [])
