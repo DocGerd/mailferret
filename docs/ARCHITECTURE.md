@@ -350,7 +350,7 @@ Each item belongs to a spike in `docs/PLAN.md` phase 2a (V1–V4) and names the 
 | Desktop distribution | `register claude-desktop` now; `.mcpb` only after item 5 of §10 is verified | Format support is documented, host support is not |
 | Plugin root | `plugin/` subdirectory | Keeps tests and fixtures out of plugin caches (§9.1) |
 | Plugin `userConfig` | None | Single source of truth (§9.3) |
-| Plugin dependency locking | `uvx --constraints` with a generated file | Exact, audited transitive set; `--exclude-newer` is not a list (§9.2) |
+| Plugin dependency locking | `uvx --constraints` with a generated file | Exact, audited transitive set if §10 item 16 holds; `--exclude-newer` is the fallback, not a list (§9.2) |
 | LICENSE copyright holder | The GitHub handle (`<owner>`), not a legal name | Minimises personal data in the repo; the handle already identifies the publisher |
 | `open_world_hint` | `True` | Content comes from arbitrary senders; clients should treat the output as external |
 | GreenMail integration scope | Linux CI only; Windows/macOS run unit tests and the fake server | Container support on hosted Windows/macOS runners is not something to depend on; the fake server covers the platform-independent protocol paths |
