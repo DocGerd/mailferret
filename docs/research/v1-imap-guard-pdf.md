@@ -1,79 +1,100 @@
 # V1: IMAP guard hook, read caps, ESEARCH, PDF limits
 
-Executed on Linux, CPython 3.11.18, 3.12.3, 3.13.18 and 3.14.10 (project floor `>=3.11`; the read path differs on 3.14), imapclient 4.3.0 (BSD-3, no deps), pypdf 7.2.0 (BSD-3). The prototype in the appendix passes on each Python. Windows and macOS: not run here. Sources: imapclient `imapclient.py`, `imap4.py`, `tls.py`; CPython `Lib/imaplib.py`; pypdf introspection; `resource` on Linux.
+Linux, CPython 3.11.18, 3.12.3, 3.13.18, 3.14.10; `imapclient==4.3.0`, `pytest==9.2.0`, `pypdf==7.2.0`. The appendix suite passes on each Python. Windows and macOS: not run, open for C4 (below). Evidence lines are `REPORT` output of the appendix.
 
-Two earlier claims were REFUTED and the design changes: `_command` is not the single choke point, and the pre-STARTTLS probe reads the wrong buffer on 3.14. See "Contradictions".
+Two earlier claims are REFUTED: `_command` is not the single choke point, and the pre-STARTTLS probe reads the wrong buffer on 3.14. See "Contradictions" and "Follow-up design edits (issue #7)": D1, D2 and C4 must not start from the `_command` hook.
 
 ## Verdicts
 
 | # | Claim | Verdict | Observed |
 |---|---|---|---|
-| 1 | `_command` is the single choke point for every command | REFUTED | `search`, `sort`, `thread`, `append`, `multiappend` and the other `_raw_command` users call `_new_tag()` then `send()` and never reach `_command`. A `_command`-only guard let `APPEND` reach the wire. On the survey below `_command` missed `UID SEARCH`, `UID SORT`, `UID THREAD` |
-| 1a | Replacement: guard `_new_tag` plus the first `send` after it, and `send` of exactly `DONE\r\n` | VERIFIED | The same mutation list also passed with the `send` guard alone (vetting in `_command` disabled). Verbs seen equal the wire verbs for the whole survey on all four Pythons. Every mutation tried (rw `SELECT`, `STORE` via add/set/remove flags and delete, `EXPUNGE`, UID `EXPUNGE`, `APPEND`, `CREATE`, `DELETE`, `RENAME`, `SUBSCRIBE`, `COPY`, `MOVE`, raw `STORE`, `IDLE`, FETCH of `BODY[]`, `RFC822`, `RFC822.TEXT`) raised before any byte was sent; `BODY.PEEK[]`, `RFC822.HEADER`, `RFC822.SIZE` passed. The FETCH check in the prototype is a denylist of `\Seen`-setting items on the first chunk; A§6 specifies an allowlist, left to D2 |
-| 2 | `fetch`, `noop`, `idle`, `expunge` use `_command`; `UID` arrives as `name == "UID"` with `args[0]` the sub-command | VERIFIED | `_command` logged `UID FETCH`, `NOOP`, `IDLE`, `EXPUNGE` |
-| 3 | The guard must run before imaplib's state check | PARTLY | True for a direct `_command` call. `imaplib.uid()` checks state first, so `delete_messages` before `SELECT` raises `imaplib.error` ("illegal in state"), not the guard error. Both fail closed: nothing is sent. Tests must accept either |
-| 4 | `DONE` bypasses `_command` (it goes through `send`) | VERIFIED | With a `_command`-only guard and IDLE allowed, the wire shows `IDLE`, `DONE` and `_command` never saw `DONE`. With the `send` guard, `DONE` is refused unless IDLE is enabled and active. Match `DONE\r\n` exactly: `send` also carries literals and AUTHENTICATE replies |
-| 5 | Implicit-TLS mode needs the same mixin on `IMAP4_TLS` | VERIFIED | `tls.IMAP4_TLS` derives from `imaplib.IMAP4`, not from `IMAP4WithTimeout`. An override whose TLS branch returned the plain class sent `CREATE`. A non-branching override returning the plain-socket class with `ssl=True` fails (`TimeoutError` after the 5 s timeout, TLS server). `GuardedTLS(GuardMixin, IMAP4_TLS)` blocked `CREATE` and `APPEND` and sent neither |
-| 6 | `_create_IMAP4` signature and body | VERIFIED | `_create_IMAP4(self)`. `stream` returns `imaplib.IMAP4_stream(self.host)`. `connect_timeout = getattr(self._timeout, "connect", None)`. `ssl` returns `tls.IMAP4_TLS(host, port, self.ssl_context, connect_timeout)`; otherwise `imap4.IMAP4WithTimeout(host, port, connect_timeout)`. The prototype hard-coded the timeout and ignored `ssl`; the override must branch on `self.ssl` and refuse `self.stream`. It runs inside `__init__`, so mixin state needs class-level defaults. Do not name helpers `_log` (imaplib uses it) |
-| 7 | A `read(size)` override caps literals | VERIFIED | A `{n}` literal over the cap raised `abort` before any literal byte was read; a 64 MiB literal was not pulled (the server's write stayed blocked, `_readbuf` empty) |
-| 8 | Per-command total cap | VERIFIED | Three 800-byte literals under a 1000-byte literal cap and a 2000-byte total aborted on the third. Reset the counter in `_new_tag`, not `_command` (raw path) |
-| 9 | `_MAXLINE` is 1,000,000 and enforced in `readline()` | VERIFIED | Overflow raises `imaplib.IMAP4.error` ("got more than N bytes"), not `abort`, on 3.11-3.14. Bytes buffered at the error: about 1.0-1.1 MB at the default (3.14), 32-88 KB with `imaplib._MAXLINE = 5000`. The module attribute is read at call time on all four Pythons, so a smaller line cap needs no `readline` override. A subclass `readline` can only check after the line is buffered |
-| 10 | The `file.peek(1)` probe sees pre-STARTTLS bytes | REFUTED on 3.14, VERIFIED on 3.11-3.13 | 3.14 reads with `sock.recv` into `self._readbuf`; `file` is a warning property over an unused `makefile`, and the kernel `MSG_PEEK` finds nothing because the bytes were already moved. The prototype missed the injection and the handshake hung. Probe `_readbuf` on 3.14, `file.peek(1)` on 3.11-3.13, then `MSG_PEEK` on all |
-| 11 | `peek(1)` on an empty buffer returns `b""` without blocking | VERIFIED | `(b"", 0.0 s)` with `settimeout(0.0)` on a `socketpair`; a later `readline` still works; with bytes only in the kernel buffer `peek(1)` returned `b"a"` |
-| 11a | The `MSG_PEEK` / kernel-buffer probe | VERIFIED (unit level) | On a `socketpair` stub `_pending()` was False when empty, True with kernel-only bytes, and restored the socket timeout. In the end-to-end STARTTLS test the injected line always arrived with the OK, so the first probe caught it. Bytes arriving after the probe (server sleeps 0.5 s, then sends plaintext) are not detectable: the TLS handshake then failed with `ssl.SSLError` and no `LOGIN` was sent |
-| 12 | `_command_complete("STARTTLS", tag)` runs after the tagged OK and before the wrap | VERIFIED | The guard raised `abort`; the fake saw no handshake and no `LOGIN` (3.11-3.14). A clean STARTTLS passed over a throwaway self-signed certificate and capabilities re-read over TLS no longer listed `STARTTLS` |
-| 13 | `starttls()` drops buffered bytes silently | REFUTED on 3.14 | 3.11-3.13: dropped. 3.14: kept in `_readbuf` and parsed as TLS-session data: the injected plaintext `* CAPABILITY ... XINJECTED` was the first CAPABILITY response read after the handshake. imaplib takes `dat[-1]`, so capabilities stayed correct here, but any injected untagged line (`BYE`, `EXISTS`, `ALERT`) is processed |
-| 14 | imaplib state errors when the guard allows a verb | VERIFIED | `imaplib.error: command X illegal in state S` for `EXAMINE`/`LIST` before login and for `UID`, `UNSELECT` in AUTH. `SEARCH`/`SORT`/`THREAD` (raw path) do no state check: a `SEARCH` in AUTH state went to the wire. `ID` (allowed in AUTH) and `UNSELECT` are in `imaplib.Commands`: no `KeyError` |
-| 15 | imapclient has no ESEARCH support | VERIFIED | "esearch" appears nowhere in the 4.3.0 source. `search(["RETURN", "(COUNT)", "ALL"])` sends the command but returns `[]` (the `ESEARCH` response is dropped). The private `_raw_command_untagged(b"SEARCH", [b"RETURN", b"(COUNT)", b"ALL"], response_name="ESEARCH")` returns the data (duplicated in the list) |
-| 16 | Verbs emitted by `select_folder(readonly=True)` and `login` | VERIFIED | `EXAMINE` and `LOGIN`; `readonly=False` emits `SELECT` (blocked). imapclient also issues extra `CAPABILITY` commands |
-| 17 | Linux `RLIMIT_AS` in the worker | VERIFIED | 512 MiB cap: `import pypdf` fine (VmPeak about 50 MB); 64 MiB allocations raised `MemoryError` after 7; without the cap 2.5 GiB succeeded; a single 1 GiB `bytearray` raised `MemoryError`. The parent survived (child exit 3) |
-| 18 | Windows job object; macOS `RLIMIT_AS` | not run here | |
+| 1 | `_command` is the single choke point | REFUTED | `search`, `sort`, `thread`, `append`, `multiappend` use `_new_tag()` + `send()`; a `_command`-only guard missed `UID SEARCH/SORT/THREAD` and let `APPEND` out |
+| 1a | Guard `_new_tag` and every `send` | VERIFIED | Verbs seen equal wire verbs on all four Pythons. 19 mutations (rw `SELECT`, `STORE` variants, `EXPUNGE`, `APPEND`, `CREATE`, `DELETE`, `RENAME`, `SUBSCRIBE`, `COPY`, `MOVE`, raw `STORE`, `IDLE`, `BODY[]`/`RFC822`/`RFC822.TEXT` fetches) raise before any byte is sent; `BODY.PEEK[]`, `RFC822.HEADER`, `RFC822.SIZE` pass. The FETCH check is a denylist here; A§6's allowlist is D2's |
+| 1b | Un-armed `send` fails closed | VERIFIED | The armed line may not contain a line break before its closing CRLF (without that check a raw `select` with an embedded CRLF put `STORE` on the wire on 3.11 and 3.12; 3.13+ imaplib rejects control characters itself). After it, only these `send`s are allowed: literal bytes of the announced length (sync and `LITERAL+`, exercised with `search(..., charset="UTF-8")`), a space, the closing CRLF, AUTHENTICATE replies (exercised with `plain_login`), `DONE` (case-insensitive) in an active IDLE. A bare tagged line, `DONE` outside IDLE and line breaks inside a fragment raise. Mutation runs: removing the gate or the armed-line check fails tests |
+| 2 | `fetch`, `noop`, `idle`, `expunge` use `_command`; `UID` is `args[0]` | VERIFIED | `_command` logged `UID FETCH`, `NOOP`, `IDLE`, `EXPUNGE` |
+| 3 | Guard runs before imaplib's state check | PARTLY | `imaplib.uid()` checks state first (`imaplib.error`). Both fail closed; tests accept either |
+| 4 | `DONE` bypasses `_command` | VERIFIED | Wire showed `IDLE`, `DONE`; `_command` never saw `DONE` |
+| 5 | Implicit TLS needs the mixin on `IMAP4_TLS` | VERIFIED | `IMAP4_TLS` is not an `IMAP4WithTimeout`; a plain-class TLS branch sent `CREATE`; a non-branching override with `ssl=True` hangs to `TimeoutError`; `GuardedTLS` blocked `CREATE`/`APPEND` |
+| 6 | `_create_IMAP4` shape | VERIFIED | Branch on `self.ssl`, refuse `self.stream`, pass `connect_timeout`. Runs inside `__init__`: class-level mixin defaults. Do not name a helper `_log` |
+| 7 | `read(size)` override caps literals | VERIFIED | Over-cap literal aborts before any literal byte is read; a 64 MiB literal was not pulled |
+| 8 | Per-command caps | VERIFIED | Three 800-byte literals under a 1000-byte literal cap and 2000-byte total abort on the third. Caps are set per command (one-shot `next_caps`, consumed in `_new_tag`, default otherwise); the counter resets in `_new_tag` |
+| 9 | `_MAXLINE` caps lines | VERIFIED, wording wrong | `imaplib.IMAP4.error` ("got more than"), not `abort`, on 3.11-3.14; read at call time. Not "before buffering": on 3.14 the overshoot past the cap varied between runs (tens of KB at cap 5,000, up to about 110 KB at the default); the test asserts cap + 256 KiB. Not measurable on 3.11-3.13 (buffer inside `file`). Process-global |
+| 10 | `file.peek(1)` sees pre-STARTTLS bytes | REFUTED on 3.14; VERIFIED on 3.11-3.13 | 3.14 reads into `self._readbuf`; the prototype missed the injection and hung |
+| 11 | `peek(1)` on an empty buffer does not block | VERIFIED | `(b"", 0.0 s)` with `settimeout(0.0)`; later `readline` works |
+| 11a | `MSG_PEEK` kernel probe | VERIFIED (unit) | False when empty, True with kernel-only bytes, timeout restored. Bytes arriving after the probe are not detectable; the handshake then fails with `ssl.SSLError` and no `LOGIN` is sent |
+| 12 | `_command_complete("STARTTLS", tag)` runs before the wrap | VERIFIED | Guard abort: no handshake, no `LOGIN`. Clean STARTTLS passes; capabilities re-read over TLS |
+| 13 | `starttls()` drops buffered bytes | REFUTED on 3.14 | Dropped on 3.11-3.13; kept in `_readbuf` and parsed inside the TLS session on 3.14 (the injected `XINJECTED` line was read as a CAPABILITY response) |
+| 14 | imaplib state errors | VERIFIED | `EXAMINE`/`LIST` before login, `UID`/`UNSELECT` in AUTH raise `imaplib.error`. Raw-path `SEARCH`/`SORT`/`THREAD` do no state check. `ID`, `UNSELECT` are in `imaplib.Commands` |
+| 15 | imapclient has no ESEARCH | VERIFIED | Not in the source; public `search(["RETURN", ...])` returns `[]`; the private `_raw_command_untagged(..., response_name="ESEARCH")` returns data |
+| 16 | `select_folder(readonly=True)` / `login` verbs | VERIFIED | `EXAMINE`, `LOGIN` (`readonly=False`: `SELECT`, blocked) |
+| 17 | Linux `RLIMIT_AS` in the worker | VERIFIED (not re-run) | 512 MiB: `import pypdf` fine; 64 MiB allocations hit `MemoryError` after 7; uncapped 2.5 GiB succeeded; parent survived |
+| 18 | Windows job object; macOS | OPEN | Owner C4, windows and macos CI runners (below) |
+| 19 | imapclient debug logging (T-03/T-21) | VERIFIED | Stock, root at DEBUG: `imapclient.imaplib` logs every server line (`< ...`), `imapclient.imapclient` logs commands, `Logged in as`. `LOGIN` is redacted (password never appeared); AUTHENTICATE logging not exercised. `debug` forced to 0 leaves `imapclient.imapclient`; with the logger tree also pinned to WARNING, no `imapclient*` record |
 
-### Wire survey (3.14, login through logout)
-
-`CAPABILITY, LOGIN, CAPABILITY, CAPABILITY, NAMESPACE, LIST, STATUS, EXAMINE, UID SEARCH, UID SORT, UID THREAD, UID FETCH, NOOP, ID, UNSELECT, LOGOUT`. The `send` guard saw all 16; `_command` saw 13.
+Wire survey (3.14): `CAPABILITY, LOGIN, CAPABILITY, CAPABILITY, NAMESPACE, LIST, STATUS, EXAMINE, UID SEARCH, UID SORT, UID THREAD, UID FETCH, NOOP, ID, UNSELECT, LOGOUT`; the `send` guard saw 16, `_command` 13.
 
 ### pypdf 7.2.0
 
-- `pypdf.Configuration` is a frozen dataclass; `overwrite_configuration(configuration=None, **overwrites)`, `apply_configuration(...)` (context manager) and `get_configuration()` exist and are exported from `pypdf`.
-- Fields present (default): `maximum_declared_stream_length`, `zlib_`/`lzw_`/`run_length_`/`jbig2_`/`brotli_maximum_output_length`, `array_based_stream_maximum_output_length` and `image_maximum_buffer_size` (all 75 MB), `stream_decoding_work_maximum_length` 300 MB, `stream_filters_maximum_length` 16, `stream_parsing_work_maximum_count` 2M, `xform_maximum_invocations_per_extraction` 5000, `page_tree_maximum_entries` 100k, `page_tree_maximum_depth` 100, `page_tree_maximum_page_entries` 2M, `embedded_files_maximum_count` 1000, `embedded_files_maximum_output_length` 250 MB, `zlib_maximum_recovery_input_length` 5 MB, `flate_maximum_columns`, `flate_maximum_row_length`, `array_`/`dictionary_maximum_element_count` 100k, plus outline, form field, named destination, annotation and XMP caps. Read the rest from `dataclasses.fields(Configuration)`.
-- `PdfReader(stream, strict=False, password=None, *, root_object_recovery_limit=10000, xref_stream_maximum_entries=2000000, xref_rebuild_maximum_entries=2000000)`.
-- Module-level `*_MAX_*` constants in `pypdf.filters` still exist (deprecated); not used.
-- No page-count or extracted-text cap: the worker loops pages itself.
-- A 200 MB deflate stream in a page content stream (about 190 KB file, with `/Resources` and a font): `page.extract_text()` raised `pypdf.errors.LimitReachedError` at the default caps, with `strict=True`, and at lowered caps (`zlib_maximum_output_length` 1 MB); `page.get_contents()` raised it too; a control page returned its text. The configuration is honoured. A first attempt without `/Resources` returned `""` silently without decoding, so bomb fixtures need a complete page.
-- T-06 fixtures: assert `LimitReachedError` maps to `limit_exceeded`.
+- `pypdf.Configuration` is frozen; `overwrite_configuration(**kw)`, `apply_configuration(...)`, `get_configuration()` exist. Fields: `dataclasses.fields(Configuration)`.
+- Defaults above `pdf_stream_bytes` (32 MiB): `maximum_declared_stream_length`, `zlib_/lzw_/run_length_/jbig2_/brotli_maximum_output_length`, `array_based_stream_maximum_output_length`, `image_maximum_buffer_size` (75 MB each); `stream_decoding_work_maximum_length`, `xfa_decoding_work_maximum_length` (300 MB); `embedded_files_maximum_output_length` (250 MB). `page_tree_maximum_entries` 100k, `_depth` 100, `_page_entries` 2M.
+- `PdfReader(stream, strict=False, password=None, *, root_object_recovery_limit, xref_stream_maximum_entries, xref_rebuild_maximum_entries)`. No page-count or text cap: the worker loops pages.
+- A 200 MB zlib stream in a complete page (about 190 KB file): `extract_text()` and `get_contents()` raised `LimitReachedError` at default and lowered caps; a control page returned text. Without `/Resources` the page returned `""` silently, so bomb fixtures need a complete page. Only the zlib path ran; the cyclic page tree and 100,000-page bombs did not (open for C4).
 
 ## Decisions for A§10
 
-1. Item 1: one guard mixin for both `IMAP4WithTimeout` and `IMAP4_TLS`, returned from an `IMAPClient._create_IMAP4` override that branches on `self.ssl`, mirrors the upstream constructor arguments and refuses `self.stream`.
-   - Commands: `_new_tag` arms a flag; the first `send` after it must parse as `tag [UID] VERB` and is checked against the allowlist and the FETCH items before any byte is written. `_command` is also overridden (earlier, clearer error) but is not the guarantee.
-   - `send(b"DONE\r\n")`: refused unless IDLE is enabled and active.
-   - Reads: `read(size)` aborts over L-02 and over the per-command total (reset in `_new_tag`). Line cap through `imaplib._MAXLINE` set from L-20; L-20's 1 MiB is above the stdlib 1,000,000, so set it explicitly. Line overflow raises `error`, not `abort`: treat both as fatal and discard the session.
-   - STARTTLS: override `_command_complete`; probe `_readbuf` (3.14) or `file.peek(1)` (<=3.13), then `MSG_PEEK`, restoring the socket timeout.
-   - The fallback (own socket wrapper) is not needed, but this uses private imapclient/imaplib API: pin imapclient and run the wire-survey and STARTTLS tests in CI on 3.11 and 3.14.
-2. Item 2: not exposed; not used. Plain `UID SEARCH`.
+1. Item 1: one guard mixin for `IMAP4WithTimeout` and `IMAP4_TLS`, from an `IMAPClient._create_IMAP4` override (row 6).
+   - Commands: `_new_tag` arms; the first `send` must parse as `tag [UID] VERB` and is vetted (allowlist, FETCH items) before any byte is written; later `send`s must match a mid-command shape (row 1b), else `ReadOnlyViolation`. `_command` is overridden for a clearer error, not as the guarantee.
+   - A failed vet leaves the gate armed, so a later `send` is parsed as a command line (fails closed). D2 resets the gate on abort and reconnect. D2 tests: a bare tagged line through `send` raises; a line break in the armed line raises.
+   - Reads: `read(size)` aborts over the active literal cap and the per-command total; the caller sets both per command from the fetched item's L-nn (L-05 header, L-02 part, L-08 attachment, L-01 full fallback), default the smallest, reset in `_new_tag`. Line cap: set `imaplib._MAXLINE` from L-20 once at startup (process-global; L-20's 1 MiB exceeds the stdlib 1,000,000). Line overflow raises `error`: treat `error` and `abort` as fatal, discard the session.
+   - STARTTLS: override `_command_complete`; probe by feature, not version: `_readbuf` if the attribute exists, else `file.peek(1)`; then `MSG_PEEK`; restore the socket timeout.
+   - Logging: `debug` is a property that reads 0 and ignores sets; the `imapclient` logger tree is pinned to WARNING with `propagate = False`. Both are required. Test: corpus at root DEBUG yields no `imapclient*` record.
+   - Private API: pin imapclient; run the wire-survey, send-gate and STARTTLS tests on every supported minor.
+2. Item 2: ESEARCH not exposed or used; plain `UID SEARCH`. L-20 is never raised to fit a SEARCH response; candidates are bounded by windowed UID ranges or the overflow maps to `limit_exceeded`.
 3. Item 10:
-   - Linux: `RLIMIT_AS` set inside the worker (verified). `RLIMIT_CPU` was not exercised.
-   - Windows job object and macOS: not run here; the A§10.10 design and fallback stand.
-   - All OSes: set `pypdf.Configuration` limits from `limits.py` at worker start; page and char caps in the worker; `LimitReachedError` maps to `limit_exceeded`.
-4. Vetting: imapclient 4.3.0 and pypdf 7.2.0 are BSD-3; advisory and maintenance status are out of this spike's scope.
+   - Linux: `RLIMIT_AS` in the worker (row 17); `RLIMIT_CPU` not exercised.
+   - Windows job object (`JOBOBJECT_EXTENDED_LIMIT_INFORMATION`, `JOB_OBJECT_LIMIT_PROCESS_MEMORY`) and macOS `RLIMIT_AS` behaviour: not researched or run; open for C4 with windows and macos CI runners. A§10.10 fallback stands meanwhile; T-06's "asserted on Linux and Windows" is unverified.
+   - All OSes: pypdf caps from `limits.py` (fields above), page and char caps in the worker, `LimitReachedError` maps to `limit_exceeded`.
+4. Vetting: imapclient 4.3.0 and pypdf 7.2.0 are BSD-3; advisories and maintenance are out of scope.
 
 ## Contradictions
 
-- A§10.1, A§6 (hook point), T-10: the guard cannot sit on `_command` alone; `APPEND` and the SEARCH/SORT/THREAD family bypass it. The hook is `_new_tag` plus `send`. The T-10 recording-fake-server proof must compare the wire against the allowlist, not the guard's own log.
-- A§2.2 and T-07: "imaplib's `starttls()` drops such bytes silently" holds on 3.11-3.13 only; on 3.14 they are kept and parsed inside the TLS session, and the earlier `file.peek` probe fails there. Suggested wording: "`starttls()` neither detects them nor discards them reliably; a guarded `_command_complete` checks the read buffer."
-- L-20 (1 MiB) is above the stdlib `_MAXLINE` (1,000,000): the effective cap is smaller unless `imaplib._MAXLINE` is set.
-- T-03: imapclient sets `_imap.debug = 5` on every connection and routes it to the `imapclient.imaplib` logger (every line, including fetched content). Its adapter redacts `LOGIN` and `AUTHENTICATE` command lines (observed: `LOGIN **REDACTED**`, the test password never appeared); AUTHENTICATE continuation lines were not exercised. T-03's "imaplib's debug output is never enabled" needs the override to reset `_imap.debug = 0` after construction, or the logger kept above DEBUG.
+- A§10.1, A§6, T-10: the hook is `_new_tag` plus every `send`, not `_command`. The T-10 recording-fake-server proof compares the wire with the allowlist, not the guard's log.
+- A§2.2, T-07: "`starttls()` drops such bytes silently" holds on 3.11-3.13 only. Suggested: "`starttls()` neither detects nor reliably discards them; a guarded `_command_complete` checks the read buffer."
+- T-08: "raises before it is buffered" is wrong for lines. Suggested: "lines are bounded at L-20 plus a bounded overshoot (asserted at 256 KiB on 3.14) on read." The cap is process-global (`imaplib._MAXLINE`); L-20 exceeds the stdlib default.
+- T-08, A§4, A§6 step 6: one fixed L-02 literal cap breaks the L-08 and L-01 fetches; the cap is per command (decision 1).
+- T-08, L-nn: the per-command response total has no row in SECURITY §5; a batch of L-25 UIDs times L-02 is far above L-19. Needs a new L-nn with a `[limits]` key.
+- L-15, L-20: without ESEARCH, `UID SEARCH` returns every match on one line (about 8 bytes per UID); above roughly 130k matches it exceeds L-20 and the session aborts.
+- T-03, T-21: "imaplib's debug output is never enabled" is not enough. imapclient sets `debug = 5` after construction (a constructor-time override cannot zero it), and its loggers carry server lines, search criteria and the username. Needs both controls of decision 1.
+- T-06: "set pypdf limits from limits.py" must name the fields (above) and derive `page_tree_maximum_*` from L-09.
 
-## Throwaway appendix
+## Follow-up design edits (issue #7)
 
-Run: `UV_PYTHON=<ver> uv run --no-project --with imapclient --with pytest python -I -m pytest -q -s test_v1_hook.py` (needs `openssl` for a throwaway certificate; `REPORT` lines are the evidence above). Not for `tests/`.
+Not edited here. Each blocks its owner.
+
+| Edit | Owner |
+|---|---|
+| A§10.1, A§6, T-10: hook is `_new_tag` + `send` with the fail-closed gate; allowlist FETCH items | SECURITY follow-up (text), D2 (code) |
+| A§2.2, T-07: reword buffered-bytes sentence; probe by feature (`_readbuf`, then `file.peek`, then `MSG_PEEK`); STARTTLS injection test on every supported minor in CI | SECURITY follow-up, D1 |
+| T-08, A§4, A§6 step 6: per-command literal cap from the fetched item's L-nn (L-05/L-02/L-08/L-01), reset in `_new_tag` | SECURITY follow-up, D2 |
+| T-08: wording "bounded at L-20 plus a bounded overshoot"; `imaplib._MAXLINE` set once, process-global | SECURITY follow-up, D2 |
+| New L-nn: per-command response total, with a `[limits]` key and ceiling | SECURITY follow-up (before D2) |
+| L-15, L-20: windowed UID ranges for SEARCH or `limit_exceeded`; L-20 never raised | SECURITY follow-up, D2 |
+| T-03, T-21: `debug` forced to 0 and the `imapclient` logger tree pinned to WARNING, with the root-DEBUG corpus test | SECURITY follow-up, D2 |
+| T-06, L-09, L-10: pypdf fields capped at `pdf_stream_bytes`; `page_tree_*` derived from L-09; cyclic-tree and 100,000-page fixtures | SECURITY follow-up, C4 |
+| T-06, A§10.10: Windows job object and macOS `RLIMIT_AS`, researched and run on windows and macos CI runners; add a STATUS open item | C4 |
+
+## Appendix: throwaway prototype (not for `tests/`)
+
+Run, per Python, from outside the repository (needs `openssl` for a throwaway certificate; fakes listen on 127.0.0.1 only):
+`UV_PYTHON=<ver> uv run --no-project --with imapclient==4.3.0 --with pytest==9.2.0 python -I -m pytest -q -s test_v1_hook.py`.
+The pypdf script runs with `--with pypdf==7.2.0`.
 
 ### test_v1_hook.py
 
 ~~~python
 # test_v1_hook.py  (throwaway; 127.0.0.1 fakes only)
 import imaplib
+import logging
 import os
 import re
 import socket
@@ -96,6 +117,9 @@ UID_OK = {"SEARCH", "FETCH", "SORT", "THREAD"}
 SEEN_ITEMS = re.compile(rb"BODY\[|BINARY\[|RFC822(?!\.(?:HEADER|SIZE)\b)", re.I)
 CMD = re.compile(rb"^(\S+) (?:(UID) )?([A-Za-z]+)")
 MAX_LITERAL, MAX_RESPONSE = 1000, 2000
+ANN_END = re.compile(rb" \{(\d+)\+?\}\r\n$")
+ANN_START = re.compile(rb"^ ?\{(\d+)(\+?)\}\r\n")
+AUTH_REPLY = re.compile(rb"^(?:[A-Za-z0-9+/=]*|\*|\r\n)$")
 MUTATING = {"SELECT", "STORE", "EXPUNGE", "APPEND", "CREATE", "DELETE", "RENAME",
             "COPY", "MOVE", "SUBSCRIBE", "UNSUBSCRIBE", "UID STORE", "UID COPY",
             "UID MOVE", "UID EXPUNGE"}
@@ -114,9 +138,20 @@ class GuardMixin:
     guard_send = True    # False: the prototype's `_command`-only guard
     allow_idle = False
     vet_in_command = True
-    _expect = False
-    _idling = False
+    _state = "closed"    # armed | open | literal | auth | idle | closed
+    _lit_left = 0
     _budget = 0
+    _lit_cap = MAX_LITERAL
+    _total_cap = MAX_RESPONSE
+    next_caps = None     # one-shot (literal, total) caps for the next command
+
+    @property
+    def debug(self):     # imapclient sets 5 after construction; stay at 0
+        return 0
+
+    @debug.setter
+    def debug(self, value):
+        pass
 
     def _rec(self, name, item):
         self.__dict__.setdefault(name, []).append(item)
@@ -139,17 +174,62 @@ class GuardMixin:
         return super()._command(name, *args)
 
     def _new_tag(self):
-        self._expect = True
+        self._state = "armed"
+        self._lit_left = 0
         self._budget = 0
+        self._lit_cap, self._total_cap = self.next_caps or (MAX_LITERAL, MAX_RESPONSE)
+        self.next_caps = None
         return super()._new_tag()
+
+    def _after_line(self, data, verb):
+        m = ANN_END.search(data)
+        if verb == "AUTHENTICATE":
+            self._state = "auth"
+        elif verb == "IDLE":
+            self._state = "idle"
+        elif m:
+            self._state, self._lit_left = "literal", int(m.group(1))
+        elif data.endswith(b"\r\n"):
+            self._state = "closed"
+        else:
+            self._state = "open"
+
+    def _check_unarmed(self, data):
+        """Fail closed: only the shapes imaplib/imapclient send mid-command."""
+        st = self._state
+        if st == "idle" and data.upper() == b"DONE\r\n" and self.allow_idle:
+            self._state = "closed"
+        elif st == "auth" and AUTH_REPLY.match(data):
+            return
+        elif st == "literal":
+            if len(data) != self._lit_left:
+                raise ReadOnlyViolation("literal length mismatch")
+            self._state = "open"
+        elif st == "open":
+            m = ANN_START.match(data)
+            if m and m.group(2):  # LITERAL+: announcement and bytes in one send
+                if len(data) - m.end() != int(m.group(1)):
+                    raise ReadOnlyViolation("literal length mismatch")
+            elif m:
+                if m.end() != len(data):
+                    raise ReadOnlyViolation("bytes after literal announcement")
+                self._state, self._lit_left = "literal", int(m.group(1))
+            elif data == b"\r\n":
+                self._state = "closed"
+            elif b"\r" in data or b"\n" in data:
+                raise ReadOnlyViolation("line break inside a command fragment")
+        else:
+            raise ReadOnlyViolation("send outside a command in flight")
 
     def send(self, data):
         if self.guard_send:
-            if self._expect:
-                self._expect = False
+            if self._state == "armed":
                 m = CMD.match(data)
                 if not m:
                     raise ReadOnlyViolation("unparseable command line")
+                body = data[:-2] if data.endswith(b"\r\n") else data
+                if b"\r" in body or b"\n" in body:
+                    raise ReadOnlyViolation("line break inside the command line")
                 verb = m.group(3).decode().upper()
                 if m.group(2):
                     self._rec("send_seen", f"UID {verb}")
@@ -159,21 +239,21 @@ class GuardMixin:
                     self._vet(verb, None)
                 if self.strict and verb == "FETCH" and SEEN_ITEMS.search(data):
                     raise ReadOnlyViolation("FETCH item sets \\Seen")
-                self._idling = verb == "IDLE"
-            elif data == b"DONE\r\n":
-                if self.strict and not (self.allow_idle and self._idling):
-                    raise ReadOnlyViolation("DONE")
-                self._rec("send_seen", "DONE")
-                self._idling = False
+                self._after_line(data, verb)
+            else:
+                if self.strict:
+                    self._check_unarmed(data)
+                if data.upper() == b"DONE\r\n":
+                    self._rec("send_seen", "DONE")
         return super().send(data)
 
     def _charge(self, n):
         self._budget += n
-        if self._budget > MAX_RESPONSE:
-            raise self.abort(f"response over {MAX_RESPONSE}")
+        if self._budget > self._total_cap:
+            raise self.abort(f"response over {self._total_cap}")
 
     def read(self, size):
-        if self.strict and size > MAX_LITERAL:
+        if self.strict and size > self._lit_cap:
             raise self.abort(f"literal {size} over cap")
         self._charge(size)
         return super().read(size)
@@ -253,8 +333,10 @@ def client_class(plain_cls, tls_cls):
 
 
 class Fake:
-    def __init__(self, mode="normal", ctx=None, implicit=False, size=5000):
+    def __init__(self, mode="normal", ctx=None, implicit=False, size=5000, literal_plus=False):
         self.mode, self.ctx, self.implicit, self.size = mode, ctx, implicit, size
+        self.literal_plus = literal_plus
+        self.auth_replies = []
         self.wire, self.events = [], []
         self.sent = threading.Event()
         self.srv = socket.create_server(("127.0.0.1", 0))
@@ -269,6 +351,7 @@ class Fake:
 
     def caps(self, tls):
         base = "IMAP4rev1 IDLE ID UNSELECT NAMESPACE MOVE SORT THREAD=REFERENCES"
+        base += " LITERAL+" if self.literal_plus else ""
         return base if tls or self.implicit else base + " STARTTLS"
 
     def run(self):
@@ -351,9 +434,12 @@ class Fake:
                 self.sent.set()
                 f.read()
                 break
+            elif verb == "AUTHENTICATE":
+                c.sendall(b"+ \r\n")
+                self.auth_replies.append(f.readline())
             elif verb == "IDLE":
                 c.sendall(b"+ idling\r\n")
-                if f.readline().strip() == b"DONE":
+                if f.readline().strip().upper() == b"DONE":
                     self.wire.append("DONE")
             elif verb == "LOGOUT":
                 c.sendall(b"* BYE bye\r\n")
@@ -549,6 +635,15 @@ def test_literal_cap():
         c.fetch([1], ["BODY.PEEK[]"])
 
 
+def test_literal_cap_is_per_command():
+    s, c = opened("big")
+    c._imap.next_caps = (6000, 6000)  # caller picks the cap from the fetched item's L-nn
+    assert c.fetch([1], ["BODY.PEEK[]"])
+    assert c._imap.next_caps is None
+    with pytest.raises(imaplib.IMAP4.abort, match="over cap"):  # reset to the default
+        c.fetch([1], ["BODY.PEEK[]"])
+
+
 def test_literal_cap_stops_reading():
     s, c = opened("huge")
     with pytest.raises(imaplib.IMAP4.abort, match="over cap"):
@@ -566,30 +661,33 @@ def test_response_total_cap():
         c.fetch([1, 2, 3], ["BODY.PEEK[]"])
 
 
-def test_line_cap_via_module_maxline():
+def _buffered(c):
+    rb = getattr(c._imap, "_readbuf", None)  # 3.14 only; earlier Pythons buffer inside `file`
+    return None if rb is None else sum(map(len, rb))
+
+
+RECV_CHUNK = 256 * 1024  # upper bound on one recv; refined from the REPORT lines
+
+
+@pytest.mark.parametrize("cap", [5000, None], ids=["maxline-5000", "maxline-default"])
+def test_line_cap(cap):
     old = imaplib._MAXLINE
-    imaplib._MAXLINE = 5000
+    if cap:
+        imaplib._MAXLINE = cap
+    effective = imaplib._MAXLINE
     try:
         s, c = opened("longline")
-        with pytest.raises(Exception) as ei:
+        with pytest.raises(imaplib.IMAP4.error, match="got more than") as ei:
             c.noop()
-        report("endless line with _MAXLINE=5000 raised", f"{type(ei.value).__module__}.{type(ei.value).__name__}: {str(ei.value)[:60]}")
-        rb = getattr(c._imap, "_readbuf", None)
-        if rb is not None:
-            report("bytes buffered at error", sum(map(len, rb)))
-        report("server completed 2000000-byte write", s.sent.wait(1.0))
+        assert not isinstance(ei.value, imaplib.IMAP4.abort)
+        buffered = _buffered(c)
+        report(f"line cap {effective}: exception", f"{type(ei.value).__module__}.{type(ei.value).__name__}")
+        report(f"line cap {effective}: bytes buffered at error", buffered)
+        report(f"line cap {effective}: server finished 2000000-byte write", s.sent.wait(1.0))
+        if buffered is not None:
+            assert buffered <= effective + RECV_CHUNK
     finally:
         imaplib._MAXLINE = old
-
-
-def test_line_cap_default_maxline_error_type():
-    s, c = opened("longline")
-    with pytest.raises(Exception) as ei:
-        c.noop()
-    report("endless line, default _MAXLINE, raised", f"{type(ei.value).__module__}.{type(ei.value).__name__}: {str(ei.value)[:60]}")
-    rb = getattr(c._imap, "_readbuf", None)
-    if rb is not None:
-        report("bytes buffered at error (default)", sum(map(len, rb)))
 
 
 def test_peek_isolated():
@@ -754,7 +852,8 @@ def test_pending_probe_kernel_only_bytes():
 
     st = Stub()
     st.sock = a
-    st._readbuf = [] if sys.version_info >= (3, 14) else None
+    uses_readbuf = hasattr(connect()[1]._imap, "_readbuf")
+    st._readbuf = [] if uses_readbuf else None
     st.file = a.makefile("rb")
     a.settimeout(7.0)
     assert st._pending() is False
@@ -763,31 +862,177 @@ def test_pending_probe_kernel_only_bytes():
     time.sleep(0.05)
     assert st._pending() is True
     assert a.gettimeout() == 7.0
-    if sys.version_info >= (3, 14):
+    if uses_readbuf:
         st._readbuf = [b"x"]
         assert st._readbuf_pending() is True
 
 
-def test_imapclient_debug_logging_leaks_login_password():
-    import logging
-    records = []
+class Records(logging.Handler):
+    def __init__(self):
+        super().__init__(logging.DEBUG)
+        self.items = []
 
-    class H(logging.Handler):
-        def emit(self, rec):
-            records.append(rec.getMessage())
+    def emit(self, rec):
+        self.items.append((rec.name, rec.getMessage()))
 
-    lg = logging.getLogger("imapclient.imaplib")
-    h = H()
-    lg.addHandler(h)
-    lg.setLevel(logging.DEBUG)
+
+def _corpus(plain):
+    s, c = connect(plain=plain, tls_cls=GuardedTLS)
+    c.login("user@example.com", "S3cretPw")
+    c.list_folders()
+    c.select_folder("INBOX", readonly=True)
+    c.search(["SUBJECT", "needle"])
+    c.fetch([1], ["FLAGS"])
+    c.logout()
+
+
+def _root_debug(fn, pin):
+    root = logging.getLogger()
+    h, old_level = Records(), root.level
+    root.addHandler(h)
+    root.setLevel(logging.DEBUG)
+    lg = logging.getLogger("imapclient")
+    saved = (lg.level, lg.propagate)
+    if pin:
+        lg.setLevel(logging.WARNING)
+        lg.propagate = False
     try:
-        s, c = connect()
-        c.login("user@example.com", "S3cretPw")
+        fn()
     finally:
-        lg.removeHandler(h)
-    leaked = [r for r in records if "S3cretPw" in r]
-    report("imapclient.imaplib DEBUG records containing the password", len(leaked))
-    report("records total / LOGIN records", (len(records), [r for r in records if "LOGIN" in r][:2]))
+        root.removeHandler(h)
+        root.setLevel(old_level)
+        lg.setLevel(saved[0])
+        lg.propagate = saved[1]
+    return [(n, m) for n, m in h.items if n.startswith("imapclient")]
+
+
+def test_imapclient_logging_corpus_at_root_debug():
+    class Stock(IMAP4WithTimeout):
+        pass
+
+    stock = _root_debug(lambda: _corpus(Stock), pin=False)
+    names = sorted({n for n, _ in stock})
+    report("stock imapclient at root DEBUG: logger names", names)
+    report("stock: records with the password", sum("S3cretPw" in m for _, m in stock))
+    report("stock: server lines (`<`) logged", [m for _, m in stock if m.startswith("<")][:2])
+    report("stock: records naming the folder/user", sum("INBOX" in m or "user@example.com" in m for _, m in stock))
+    assert not any("S3cretPw" in m for _, m in stock)
+    assert any(n == "imapclient.imaplib" and m.lstrip().startswith("<") for n, m in stock)
+    assert any(n == "imapclient.imapclient" for n, _ in stock)
+
+    only_debug0 = _root_debug(lambda: _corpus(GuardedPlain), pin=False)
+    report("debug=0 only: remaining logger names", sorted({n for n, _ in only_debug0}))
+    assert not any(n == "imapclient.imaplib" for n, _ in only_debug0)
+    assert any(n == "imapclient.imapclient" for n, _ in only_debug0)
+
+    both = _root_debug(lambda: _corpus(GuardedPlain), pin=True)
+    report("debug=0 plus logger tree pinned: imapclient* records", len(both))
+    assert both == []
+
+
+def test_debug_property_ignores_set():
+    s, c = connect()
+    assert c._imap.debug == 0
+    c._imap.debug = 5
+    assert c._imap.debug == 0
+
+
+def test_unarmed_send_fails_closed():
+    s, c = opened()
+    for data in (b"X9 STORE 1 +FLAGS (\\Seen)\r\n", b"DONE\r\n", b"done\r\n", b"\r\n", b" ", b"x"):
+        with pytest.raises(ReadOnlyViolation):
+            c._imap.send(data)
+    c.noop()
+    with pytest.raises(ReadOnlyViolation):
+        c._imap.send(b"X9 STORE 1 +FLAGS (\\Seen)\r\n")
+    assert "STORE" not in s.wire and "DONE" not in s.wire
+
+
+def test_done_matches_case_insensitively_while_idle_is_active():
+    s, c = opened(plain=IdlePlain)
+    c.idle()
+    c._imap.send(b"done\r\n")
+    c._consume_until_tagged_response(c._idle_tag, "IDLE")
+    assert s.wire[-2:] == ["IDLE", "DONE"]
+    with pytest.raises(ReadOnlyViolation):
+        c._imap.send(b"done\r\n")
+
+
+def test_mid_command_shapes_pass_and_stray_fragments_fail():
+    st = GuardedPlain.__new__(GuardedPlain)
+    st._state, st._lit_left = "auth", 0
+    for ok in (b"AHVzZXIAcGFzcw==", b"\r\n", b"*"):
+        st._check_unarmed(ok)
+    for bad in (b"X9 STORE 1\r\n", b"A B", b"AHVz\r\nX9"):
+        with pytest.raises(ReadOnlyViolation):
+            st._check_unarmed(bad)
+    st._state, st._lit_left = "literal", 5
+    st._check_unarmed(b"abcde")
+    assert st._state == "open"
+    st._check_unarmed(b" ")
+    st._check_unarmed(b"\r\n")
+    assert st._state == "closed"
+    with pytest.raises(ReadOnlyViolation):
+        st._check_unarmed(b" ")
+    st._state = "literal"
+    st._lit_left = 5
+    with pytest.raises(ReadOnlyViolation):
+        st._check_unarmed(b"abcdef")
+
+
+def _injection_probes(c):
+    inj = "X9 STORE 1 +FLAGS (\\Seen)"
+    return {
+        "raw select": lambda: c._imap.select("INBOX\r\n" + inj, readonly=True),
+        "fetch item": lambda: c.fetch([1], ["FLAGS)\r\n" + inj + " ("]),
+        "folder name": lambda: c.select_folder("INBOX\r\n" + inj, readonly=True),
+        "search term": lambda: c.search(["SUBJECT", "a\r\n" + inj]),
+        "search 8-bit": lambda: c.search(["SUBJECT", "\u00e9\r\n" + inj], charset="UTF-8"),
+    }
+
+
+@pytest.mark.parametrize("guarded", [True, False], ids=["guarded", "armed-line-check-off"])
+def test_embedded_line_break_never_adds_a_verb(guarded):
+    class NoLineCheck(GuardedPlain):
+        def send(self, data):
+            if self._state == "armed":
+                data_check = data
+                self._state = "open"  # skip the armed-line check, keep the rest
+                return super(GuardMixin, self).send(data_check)
+            return super().send(data)
+
+    s, c = opened(plain=GuardedPlain if guarded else NoLineCheck)
+    outcome = {}
+    for name, call in _injection_probes(c).items():
+        try:
+            call()
+            outcome[name] = "no error"
+        except Exception as e:  # noqa: BLE001
+            outcome[name] = type(e).__name__
+    report(f"{'guarded' if guarded else 'unchecked'} injection probes", outcome)
+    report("wire", s.wire)
+    if guarded:
+        assert MUTATING.isdisjoint(s.wire)
+    else:  # 3.13+ imaplib rejects control characters itself; 3.11/3.12 do not
+        assert "STORE" in s.wire or outcome["raw select"] == "ValueError"
+
+
+def test_real_literals_pass_the_strict_guard():
+    s, c = opened()
+    assert c.search(["SUBJECT", "\u00e9"], charset="UTF-8") == [1, 2, 3]
+    assert s.wire[-1] == "UID SEARCH"
+    s, c = opened(literal_plus=True)
+    assert c.search(["SUBJECT", "\u00e9"], charset="UTF-8") == [1, 2, 3]
+    assert s.wire[-1] == "UID SEARCH"
+    assert c._imap._state == "closed"
+
+
+def test_authenticate_passes_the_strict_guard():
+    s, c = connect()
+    c.plain_login("user@example.com", "x")
+    assert "AUTHENTICATE" in s.wire
+    assert s.auth_replies and s.auth_replies[0].endswith(b"\r\n")
+    report("AUTHENTICATE PLAIN reply line", len(s.auth_replies[0]))
 ~~~
 
 ### Linux memory cap (rlimit_worker.py)
