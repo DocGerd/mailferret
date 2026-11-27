@@ -68,6 +68,21 @@ def test_auth_enabled_rejects_bad_credentials(greenmail: Greenmail) -> None:
         conn.logout()
 
 
+def test_failed_login_does_not_disturb_other_session(greenmail: Greenmail) -> None:
+    bob = connect(greenmail.ca_file, BOB)
+    try:
+        bad = connect(greenmail.ca_file)
+        try:
+            with pytest.raises(imaplib.IMAP4.error):
+                bad.login(ALICE, "wrong")
+        finally:
+            bad.logout()
+        assert bob.select("INBOX", readonly=True)[0] == "OK"
+        assert bob.noop()[0] == "OK"
+    finally:
+        bob.logout()
+
+
 def test_seeded_corpus_and_account_isolation(greenmail: Greenmail) -> None:
     corpus = committed()
     alice = connect(greenmail.ca_file, ALICE)
@@ -132,9 +147,9 @@ def test_plaintext_port_has_no_starttls_and_no_login_sent(greenmail: Greenmail) 
         return ACCOUNTS[account]
 
     def connect_starttls_required(get: Callable[[str], str]) -> None:
-        # Stand-in for the D1 policy; swap for the real session once imap/ lands.
+        # Stand-in for the D1 policy; swapped for the real connect() in issue #26.
         _Recorder.sent = []
-        conn = _Recorder(HOST, IMAP_PORT)
+        conn = _Recorder(HOST, IMAP_PORT, timeout=10)
         try:
             if "STARTTLS" not in conn.capabilities:
                 raise ConnectionError("server does not offer STARTTLS")
@@ -149,12 +164,13 @@ def test_plaintext_port_has_no_starttls_and_no_login_sent(greenmail: Greenmail) 
     assert not re.search(rb"(?i)\bLOGIN\b|\bAUTHENTICATE\b", wire)
     assert gets == []
 
-    conn = imaplib.IMAP4(HOST, IMAP_PORT)
+    conn = imaplib.IMAP4(HOST, IMAP_PORT, timeout=10)
     try:
         assert "STARTTLS" not in conn.capabilities
         assert "IMAP4REV1" in conn.capabilities
-        with pytest.raises(imaplib.IMAP4.error):
-            conn.starttls()
+        # imaplib.starttls() refuses client-side; send the command raw.
+        with pytest.raises(imaplib.IMAP4.error, match="BAD"):
+            conn._simple_command("STARTTLS")
     finally:
         conn.shutdown()
 

@@ -1,4 +1,4 @@
-"""Client TLS context built as A§2.2 prescribes (stand-in until `imap/` provides it)."""
+"""Client TLS context as A§2.2 prescribes; stand-in until `imap/` provides it (issue #26)."""
 
 from __future__ import annotations
 

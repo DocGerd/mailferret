@@ -4,6 +4,7 @@ import imaplib
 import os
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import time
@@ -50,7 +51,7 @@ class Greenmail:
 
 def _compose(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # noqa: S603
-        ["docker", "compose", "-p", "mailferret-it", "-f", str(COMPOSE_FILE), *args],  # noqa: S607
+        ["docker", "compose", "-f", str(COMPOSE_FILE), *args],  # noqa: S607
         env=env,
         capture_output=True,
         text=True,
@@ -60,7 +61,7 @@ def _compose(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str
 
 
 def connect(ca_file: Path | None, account: str | None = None) -> imaplib.IMAP4_SSL:
-    conn = imaplib.IMAP4_SSL(HOST, IMAPS_PORT, ssl_context=build_context(ca_file))
+    conn = imaplib.IMAP4_SSL(HOST, IMAPS_PORT, ssl_context=build_context(ca_file), timeout=10)
     if account is not None:
         conn.login(account, ACCOUNTS[account])
     return conn
@@ -73,6 +74,8 @@ def _wait_ready(ca_file: Path) -> None:
         try:
             connect(ca_file).logout()
             return
+        except ssl.SSLCertVerificationError:
+            raise
         except (OSError, imaplib.IMAP4.error) as exc:
             last = exc
             time.sleep(1)

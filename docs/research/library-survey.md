@@ -21,7 +21,7 @@ Snapshot taken **2026-11-27** from PyPI JSON, pypistats.org, api.osv.dev, endofl
 | CLI | `click` | 8.5.1 (2026-11-06) | BSD-3 | `typer` is fine but only a wrapper |
 | Config | `pydantic` v2 | 2.14.4 (2026-11-19) | MIT | already a dependency of `mcp` |
 | TOML | `tomllib` (read) + `tomlkit` (write) | 0.15.3 (2026-11-24) | MIT | tomli-w was dropped after vetting (see below) |
-| Test IMAP server | GreenMail `greenmail/standalone` | 2.1.15 | Apache-2.0 | IMAP+IMAPS. Preload by APPEND in fixtures. Configured via `GREENMAIL_OPTS` / `GREENMAIL_ADDITIONAL_OPTS` / `JAVA_OPTS` (verified in the GreenMail docs); defaults are auth disabled and a self-signed certificate |
+| Test IMAP server | GreenMail `greenmail/standalone` | 2.1.15 (digest `sha256:309ba544ea482e5d4265d09921cdab07c8dad2cc4481d715c9b8ff5d3f0a149f`) | Apache-2.0 | IMAP+IMAPS. Preload by APPEND in fixtures. Configured via `GREENMAIL_OPTS` / `GREENMAIL_ADDITIONAL_OPTS` / `JAVA_OPTS` (verified in the GreenMail docs); defaults are auth disabled and a self-signed certificate |
 | Lint | `ruff` | 0.17.6 (2026-11-19) | MIT | |
 | Types | `mypy --strict` | 2.4.1 (2026-10-28) | MIT | `ty` is still 0.0.x beta |
 | Tests | `pytest` | 9.2.0 (2026-10-27) | MIT | |
