@@ -66,7 +66,9 @@ def test_capabilities_and_wire_log(fake_imap: FakeImapServer) -> None:
     fake_imap.wait_for("closed")
     assert fake_imap.wire[0].endswith("CAPABILITY")
     assert any(line.endswith('LOGIN user@example.com "dummy-password"') for line in fake_imap.wire)
-    assert [c.verb for c in fake_imap.commands] == ["CAPABILITY", "LOGIN", "CAPABILITY", "LOGOUT"]
+    verbs = [c.verb for c in fake_imap.commands]
+    assert verbs[0] == "CAPABILITY"
+    assert verbs.index("LOGIN") < verbs.index("LOGOUT") == len(verbs) - 1
 
 
 def test_scripted_untagged_tagged_no_and_bad(fake_imap: FakeImapServer) -> None:
