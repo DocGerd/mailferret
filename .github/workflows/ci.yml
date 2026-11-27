@@ -29,7 +29,6 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
-          version: "0.13.10"
           python-version: ${{ matrix.python }}
       - run: uv run ruff check .
       - run: uv run ruff format --check .
@@ -44,8 +43,6 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
-        with:
-          version: "0.13.10"
       - run: uv lock --check
 
   audit:
@@ -56,6 +53,4 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
-        with:
-          version: "0.13.10"
       - run: uv audit --locked --preview-features audit-command
