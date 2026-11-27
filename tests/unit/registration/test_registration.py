@@ -214,6 +214,24 @@ def test_desktop_candidates_wsl_reads_windows_side_only(tmp_path: Path) -> None:
     assert [c.path for c in plain] == [linux]
 
 
+@posix_only
+@pytest.mark.skipif(os.name == "posix" and os.geteuid() == 0, reason="root ignores modes")
+def test_desktop_candidates_wsl_skips_unreadable_profile(tmp_path: Path) -> None:
+    users = tmp_path / "mnt" / "c" / "Users"
+    good = users / "alice" / "AppData" / "Roaming" / "Claude" / "claude_desktop_config.json"
+    good.parent.mkdir(parents=True)
+    good.write_text("{}")
+    locked = users / "bob"
+    (locked / "AppData").mkdir(parents=True)
+    locked.chmod(0)
+    try:
+        env = {"WSL_DISTRO_NAME": "Distro"}
+        got = desktop_candidates("linux", env, tmp_path, wsl_mount=tmp_path / "mnt")
+    finally:
+        locked.chmod(0o700)
+    assert [c.path for c in got] == [good]
+
+
 def test_desktop_candidates_wsl_without_mount(tmp_path: Path) -> None:
     env = {"WSL_DISTRO_NAME": "Distro"}
     assert desktop_candidates("linux", env, tmp_path, wsl_mount=tmp_path / "none") == []
