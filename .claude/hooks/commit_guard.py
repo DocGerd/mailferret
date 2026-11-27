@@ -30,6 +30,11 @@ GIT = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
 # The hook timeout in settings.json is 600 s. All steps share this deadline so the hook never times out.
 DEADLINE = time.monotonic() + 540
 PYTEST_CAP_S = 420
+# Inherited, these give the commit another repo, index or config than the guard resolves: a commit then blocks.
+REDIRECTING_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+                   "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT")
+SCRUBBED_ENV = (*REDIRECTING_ENV, "GIT_PREFIX", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+                "GIT_CONFIG")
 
 PUNCT = ";&|()<>\n"
 GIT_OPTS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env",
@@ -280,10 +285,16 @@ def remaining(cap: float) -> float:
     return min(cap, left)
 
 
+def git_env(drop_all: bool = False) -> dict[str, str]:
+    return {k: v for k, v in os.environ.items()
+            if not (k.startswith("GIT_") if drop_all else
+                    k in SCRUBBED_ENV or k.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")))}
+
+
 def git_out(cwd: Path, *args: str) -> str | None:
     try:
         out = subprocess.run([*GIT, *args], cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                             timeout=remaining(15))
+                             env=git_env(), timeout=remaining(15))
     except (OSError, subprocess.SubprocessError):
         return None
     return out.stdout.strip() if out.returncode == 0 else None
@@ -312,7 +323,8 @@ def run_scanner(project: Path, cwd: Path, args: list[str]) -> None:
         raise Blocked("Commit blocked: scripts/pii_check.py is missing.")
     try:
         res = subprocess.run([sys.executable, str(scanner), *args], cwd=cwd, stdin=subprocess.DEVNULL,
-                             capture_output=True, text=True, errors="replace", timeout=remaining(120))
+                             capture_output=True, text=True, errors="replace", env=git_env(),
+                             timeout=remaining(120))
     except (OSError, subprocess.SubprocessError) as exc:
         raise Blocked(f"Commit blocked: PII scanner did not run ({exc.__class__.__name__}).") from None
     if res.returncode != 0:
@@ -347,7 +359,8 @@ def run_tests(root: Path) -> None:
         return
     try:
         res = subprocess.run(["uv", "run", "pytest", "-q", "-x"], cwd=root, stdin=subprocess.DEVNULL,
-                             capture_output=True, text=True, errors="replace", timeout=remaining(PYTEST_CAP_S))
+                             capture_output=True, text=True, errors="replace", env=git_env(drop_all=True),
+                             timeout=remaining(PYTEST_CAP_S))
     except FileNotFoundError:
         raise Blocked("Commit blocked: uv not found, tests cannot run.") from None
     except subprocess.TimeoutExpired:
@@ -366,6 +379,9 @@ def main(mode: str, payload: dict) -> int:
     if not (project / ".git").exists():
         return 0
     try:
+        inherited = sorted(k for k in REDIRECTING_ENV if k in os.environ)
+        if inherited:
+            raise Blocked(f"Commit blocked: inherited {', '.join(inherited)} would redirect the commit; unset it.")
         own = repo_of(project)
         if own is None:
             raise Blocked("Commit blocked: cannot resolve this project's git repository.")

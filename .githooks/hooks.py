@@ -9,6 +9,7 @@ Honours the optional untracked .git/info/pii-patterns via scripts/pii_check.py.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -30,7 +31,10 @@ def main(hook: str, args: list[str]) -> str | None:
         return f"{hook}: blocked by the PII scan (see above)"
     if hook != "commit-msg" and (root / "pyproject.toml").is_file():
         try:
-            rc = subprocess.run(["uv", "run", "pytest", "-q", "-x"], cwd=root, stdin=subprocess.DEVNULL).returncode
+            # The scanner keeps git's env: GIT_INDEX_FILE is what the commit records. The tests must not inherit it.
+            env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+            rc = subprocess.run(["uv", "run", "pytest", "-q", "-x"], cwd=root, stdin=subprocess.DEVNULL,
+                                env=env).returncode
         except FileNotFoundError:
             return f"{hook}: uv not found, tests cannot run"
         if rc not in (0, 5):  # 5 = no tests collected

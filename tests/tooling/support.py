@@ -19,8 +19,9 @@ GUARD = REPO / ".claude" / "hooks" / "commit_guard.py"
 AT = "@"
 EMAIL = "jane.roe" + AT + "mailhost-corp.de"
 HOME = "/" + "home/" + "jroe"
+# Inherited GIT_* (a hook in a linked worktree exports GIT_DIR and GIT_INDEX_FILE) would aim the fixtures at that repo.
 ENV = {
-    **os.environ,
+    **{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
     "GIT_CONFIG_GLOBAL": os.devnull,
     "GIT_CONFIG_NOSYSTEM": "1",
     "GIT_AUTHOR_NAME": "Test",

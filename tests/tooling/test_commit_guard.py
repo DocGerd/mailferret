@@ -13,11 +13,12 @@ ENV_LINE = "IMAP_PASS" + "WORD=" + "s3cr3t" + "Value9"
 
 
 class Guard(RepoCase):
-    def guard(self, command: str, cwd: Path | None = None, raw: str | None = None) -> int:
+    def guard(self, command: str, cwd: Path | None = None, raw: str | None = None,
+              env: dict[str, str] | None = None) -> int:
         payload = raw if raw is not None else json.dumps(
             {"tool_input": {"command": command}, "cwd": str(cwd or self.repo)})
         res = run(["python3", str(GUARD), "pii"], self.repo, stdin=payload,
-                  env={**ENV, "CLAUDE_PROJECT_DIR": str(self.repo)})
+                  env={**ENV, "CLAUDE_PROJECT_DIR": str(self.repo), **(env or {})})
         self.assertNotIn(EMAIL, res.stderr)
         return res.returncode
 
@@ -50,6 +51,16 @@ class Guard(RepoCase):
         git(other, "init", "-q")
         self.stage_hit(other)
         self.assertEqual(self.guard(f"cd {other} && git commit -m x"), 0)
+
+    def test_inherited_git_env_blocks_commits(self) -> None:
+        other = self.tmp / "other"
+        other.mkdir()
+        git(other, "init", "-q")
+        redirect = {"GIT_DIR": str(other / ".git"), "GIT_INDEX_FILE": str(other / ".git" / "index")}
+        self.assertEqual(self.guard("git commit -m x", env=redirect), 2)
+        self.assertEqual(self.guard("git status", env=redirect), 0)
+        injected = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.worktree", "GIT_CONFIG_VALUE_0": str(other)}
+        self.assertEqual(self.guard("git commit -a -m x", env=injected), 2)
 
     def test_force_added_ignored_file(self) -> None:
         self.write(".env", ENV_LINE + "\n")
