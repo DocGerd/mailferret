@@ -4,23 +4,36 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
 from .support import EMAIL, ENV, GUARD, HOME, RepoCase, git, run
 
 ENV_LINE = "IMAP_PASS" + "WORD=" + "s3cr3t" + "Value9"
+SENTINEL = "sentinel-value-7f3a"
+# Hardcoded, not imported from the guard: dropping a name there must fail these tests.
+REDIRECTING = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+               "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+               "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CEILING_DIRECTORIES")
 
 
 class Guard(RepoCase):
     def guard(self, command: str, cwd: Path | None = None, raw: str | None = None,
-              env: dict[str, str] | None = None) -> int:
+              env: dict[str, str] | None = None, mode: str = "pii") -> int:
+        """Exit code; stderr is kept in self.stderr."""
         payload = raw if raw is not None else json.dumps(
             {"tool_input": {"command": command}, "cwd": str(cwd or self.repo)})
-        res = run(["python3", str(GUARD), "pii"], self.repo, stdin=payload,
+        res = run(["python3", str(GUARD), mode], self.repo, stdin=payload,
                   env={**ENV, "CLAUDE_PROJECT_DIR": str(self.repo), **(env or {})})
         self.assertNotIn(EMAIL, res.stderr)
+        self.stderr = res.stderr
         return res.returncode
+
+    def assert_blocked_naming(self, command: str, name: str, env: dict[str, str] | None = None) -> None:
+        self.assertEqual(self.guard(command, env=env), 2)
+        self.assertIn(name, self.stderr)
+        self.assertNotIn(SENTINEL, self.stderr)
 
     def stage_hit(self, root: Path) -> None:
         self.write("leak.txt", f"{EMAIL}\n", root=root)
@@ -53,14 +66,47 @@ class Guard(RepoCase):
         self.assertEqual(self.guard(f"cd {other} && git commit -m x"), 0)
 
     def test_inherited_git_env_blocks_commits(self) -> None:
-        other = self.tmp / "other"
-        other.mkdir()
-        git(other, "init", "-q")
-        redirect = {"GIT_DIR": str(other / ".git"), "GIT_INDEX_FILE": str(other / ".git" / "index")}
-        self.assertEqual(self.guard("git commit -m x", env=redirect), 2)
-        self.assertEqual(self.guard("git status", env=redirect), 0)
-        injected = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.worktree", "GIT_CONFIG_VALUE_0": str(other)}
-        self.assertEqual(self.guard("git commit -a -m x", env=injected), 2)
+        for name in REDIRECTING:
+            with self.subTest(name=name):
+                self.assert_blocked_naming("git commit -a -m x", name, env={name: SENTINEL})
+                self.assertEqual(self.guard("git status", env={name: SENTINEL}), 0)
+
+    def test_redirect_set_in_the_command_blocks_commits(self) -> None:
+        forms = ("{n}={v} git commit -m x", "export {n}={v}; git commit -m x", "declare -x {n}={v} && git commit -m x",
+                 "typeset -x {n}={v}; git commit -m x", "env {n}={v} git commit -m x", "{n}={v}; git commit -m x",
+                 "{n}={v} && git commit -m x", "{n}+={v} git commit -m x", "sudo {n}={v} git commit -m x",
+                 "bash -c 'export {n}={v}; git commit -m x'", "export {n}; git commit -m x",
+                 "{n}={v} git commit -m 'unterminated")
+        for name in REDIRECTING:
+            for form in forms:
+                command = form.format(n=name, v=SENTINEL)
+                with self.subTest(command=command):
+                    self.assert_blocked_naming(command, name)
+
+    def test_loaders_before_a_commit_block(self) -> None:
+        for command, label in (("set -a; . ./vars; git commit -m x", "set -a"), ("set -o allexport; git commit -m x",
+                               "set -a"), ("source ./vars && git commit -m x", "source"),
+                               (". ./vars && git commit -m x", "."), ('eval "$X"; git commit -m x', "eval"),
+                               ('export "$N"=1; git commit -m x', "export")):
+            with self.subTest(command=command):
+                self.assert_blocked_naming(command, label)
+
+    def test_unrelated_assignments_pass(self) -> None:
+        for command in ("GIT_DIR=x git status", "export GIT_DIR=x; git log -1", 'git commit -m "GIT_DIR=x"',
+                        "FOO=1 git commit -m x", "export PATH=$PATH:/x && git commit -m x", "set -e; git commit -m x",
+                        "GIT_AUTHOR_NAME=x git commit -m x", f"git commit -F - <<'EOF'\nfix: GIT_DIR=x\nEOF"):
+            with self.subTest(command=command):
+                self.assertEqual(self.guard(command), 0, self.stderr)
+
+    def test_tests_mode_runs_pytest_without_git_env(self) -> None:
+        self.write("pyproject.toml", "")
+        stub = self.write("bin/uv", '#!/bin/sh\nenv > "$UV_ENV_OUT"\n', root=self.tmp)
+        stub.chmod(0o755)
+        out = self.tmp / "uv-env"
+        env = {"PATH": f"{stub.parent}{os.pathsep}{ENV['PATH']}", "UV_ENV_OUT": str(out), "GIT_PREFIX": "sub/"}
+        self.assertEqual(self.guard("git commit -m x", env=env, mode="tests"), 0, self.stderr)
+        self.assertTrue(out.exists())
+        self.assertEqual([line for line in out.read_text().splitlines() if line.startswith("GIT_")], [])
 
     def test_force_added_ignored_file(self) -> None:
         self.write(".env", ENV_LINE + "\n")

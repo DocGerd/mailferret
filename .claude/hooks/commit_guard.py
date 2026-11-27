@@ -30,11 +30,17 @@ GIT = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
 # The hook timeout in settings.json is 600 s. All steps share this deadline so the hook never times out.
 DEADLINE = time.monotonic() + 540
 PYTEST_CAP_S = 420
-# Inherited, these give the commit another repo, index or config than the guard resolves: a commit then blocks.
+# Inherited or set in the command, these give the commit another repo, index, config or discovery than the guard
+# resolves: a commit then blocks.
 REDIRECTING_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
-                   "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT")
-SCRUBBED_ENV = (*REDIRECTING_ENV, "GIT_PREFIX", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-                "GIT_CONFIG")
+                   "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+                   "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CEILING_DIRECTORIES")
+REDIRECTING_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+SCRUBBED_ENV = ("GIT_PREFIX", "GIT_CONFIG")
+# Builtins that export names, and segments that may export anything.
+EXPORTERS = {"export", "declare", "typeset", "local", "readonly"}
+LOADERS = {"source", ".", "eval"}
+ASSIGNMENT = re.compile(r"([A-Za-z_]\w*)\+?=")
 
 PUNCT = ";&|()<>\n"
 GIT_OPTS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env",
@@ -82,16 +88,40 @@ class Commit:
     force_paths: list[Path] = field(default_factory=list)  # `git add -f` pathspecs, absolute
     messages: list[str] = field(default_factory=list)
     message_files: list[Path] = field(default_factory=list)
+    redirects: list[str] = field(default_factory=list)  # redirecting names or loader labels set in the command
 
     def merge(self, other: Commit) -> None:
         for name in ("detected", "ambiguous", "worktree", "adds", "all_worktrees"):
             setattr(self, name, getattr(self, name) or getattr(other, name))
-        for name in ("dirs", "maybe_dirs", "force_paths", "messages", "message_files"):
+        for name in ("dirs", "maybe_dirs", "force_paths", "messages", "message_files", "redirects"):
             getattr(self, name).extend(getattr(other, name))
 
 
 def expands(token: str) -> bool:
     return "$" in token or "`" in token
+
+
+def redirecting(name: str) -> bool:
+    return name in REDIRECTING_ENV or name.startswith(REDIRECTING_PREFIXES)
+
+
+def _assigned(token: str) -> str | None:
+    m = ASSIGNMENT.match(token)
+    return m.group(1) if m and redirecting(m.group(1)) else None
+
+
+def _note_exports(tokens: list[str], result: Commit) -> None:
+    head = tokens[0]
+    if head in EXPORTERS:
+        for tok in tokens[1:]:
+            m = ASSIGNMENT.match(tok)
+            name = m.group(1) if m else tok
+            if expands(name) or redirecting(name):
+                result.redirects.append(head if expands(name) else name)
+    elif head in LOADERS:
+        result.redirects.append(head)
+    elif head == "set" and any(t == "allexport" or re.fullmatch(r"-[A-Za-z]*a[A-Za-z]*", t) for t in tokens[1:]):
+        result.redirects.append("set -a")
 
 
 def segments(text: str) -> tuple[list[list[str]], bool] | None:
@@ -119,9 +149,10 @@ def segments(text: str) -> tuple[list[list[str]], bool] | None:
 
 
 def _strip_wrappers(tokens: list[str], result: Commit) -> list[str]:
-    while tokens and (re.fullmatch(r"\w+=.*", tokens[0]) or tokens[0] in WRAPPERS):
-        if tokens[0].startswith(("GIT_DIR=", "GIT_WORK_TREE=", "GIT_INDEX_FILE=", "GIT_COMMON_DIR=")):
-            result.all_worktrees = result.ambiguous = True
+    while tokens and (ASSIGNMENT.match(tokens[0]) or tokens[0] in WRAPPERS):
+        name = _assigned(tokens[0])
+        if name:
+            result.redirects.append(name)
         tokens.pop(0)
         while tokens and (tokens[0].startswith("-") or re.fullmatch(r"[\d.]+[smhd]?", tokens[0])):
             tokens.pop(0)
@@ -236,6 +267,9 @@ def analyse(command: str, cwd: Path) -> Commit:
         if mentions_git:
             result.detected = result.ambiguous = result.all_worktrees = True
             result.dirs.append(cwd)
+            result.redirects += [w for w in re.findall(r"[A-Za-z_]\w*", text) if redirecting(w)]
+            if re.search(r"\b(?:source|eval|allexport)\b|\bset\s+-[A-Za-z]*a|(?:^|[\s;&|(])\.\s", text):
+                result.redirects.append("source/eval/set -a")
     else:
         segs, subshell = parsed
         cur, visited = cwd, [cwd]
@@ -243,6 +277,7 @@ def analyse(command: str, cwd: Path) -> Commit:
             tokens = _strip_wrappers(list(raw), result)
             if not tokens:
                 continue
+            _note_exports(tokens, result)
             head = tokens[0]
             if head in ("cd", "pushd", "popd"):
                 args = [t for t in tokens[1:] if not t.startswith("-")]
@@ -263,6 +298,11 @@ def analyse(command: str, cwd: Path) -> Commit:
                     result.detected = result.ambiguous = result.all_worktrees = True
                     result.dirs.append(cur)
                     result.messages.append(seg)
+                    for tok in tokens:
+                        if Path(tok).name in ("git", "git.exe"):
+                            break
+                        if name := _assigned(tok):
+                            result.redirects.append(name)
                 continue
             _git_segment(tokens, cur, result)
         if subshell and len(visited) > 1:
@@ -286,9 +326,8 @@ def remaining(cap: float) -> float:
 
 
 def git_env(drop_all: bool = False) -> dict[str, str]:
-    return {k: v for k, v in os.environ.items()
-            if not (k.startswith("GIT_") if drop_all else
-                    k in SCRUBBED_ENV or k.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")))}
+    """Redirecting names never get here: main() blocks them first."""
+    return {k: v for k, v in os.environ.items() if not (k.startswith("GIT_") if drop_all else k in SCRUBBED_ENV)}
 
 
 def git_out(cwd: Path, *args: str) -> str | None:
@@ -379,9 +418,12 @@ def main(mode: str, payload: dict) -> int:
     if not (project / ".git").exists():
         return 0
     try:
-        inherited = sorted(k for k in REDIRECTING_ENV if k in os.environ)
+        inherited = sorted(k for k in os.environ if redirecting(k))
         if inherited:
             raise Blocked(f"Commit blocked: inherited {', '.join(inherited)} would redirect the commit; unset it.")
+        if commit.redirects:
+            raise Blocked(f"Commit blocked: {', '.join(dict.fromkeys(commit.redirects))} in the same command could "
+                          "redirect the commit; run the commit on its own.")
         own = repo_of(project)
         if own is None:
             raise Blocked("Commit blocked: cannot resolve this project's git repository.")
