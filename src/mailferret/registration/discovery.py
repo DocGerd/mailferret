@@ -37,13 +37,24 @@ def _regular(platform: str, env: Mapping[str, str], home: Path) -> Path | None:
 
 def _wsl_candidates(mount: Path) -> list[Candidate]:
     found: list[Candidate] = []
-    for drive in sorted(mount.glob("[a-zA-Z]")):
-        for user in sorted((drive / "Users").glob("*")):
-            regular = user / "AppData" / "Roaming" / "Claude" / _FILE
-            if regular.is_file():
-                found.append(Candidate(regular, "regular"))
-            packages = user / "AppData" / "Local" / "Packages"
-            found.extend(Candidate(p, "msix") for p in sorted(packages.glob("Claude_*")))
+    try:
+        drives = sorted(mount.glob("[a-zA-Z]"))
+    except OSError:
+        return found
+    for drive in drives:
+        try:
+            users = sorted((drive / "Users").glob("*"))
+        except OSError:
+            continue
+        for user in users:
+            try:
+                regular = user / "AppData" / "Roaming" / "Claude" / _FILE
+                if regular.is_file():
+                    found.append(Candidate(regular, "regular"))
+                packages = user / "AppData" / "Local" / "Packages"
+                found.extend(Candidate(p, "msix") for p in sorted(packages.glob("Claude_*")))
+            except OSError:
+                continue
     return found
 
 
