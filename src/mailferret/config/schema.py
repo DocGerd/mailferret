@@ -9,6 +9,8 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
+    StrictInt,
     StringConstraints,
     field_validator,
     model_validator,
@@ -60,7 +62,7 @@ LIMIT_CEILINGS: dict[str, int] = {
 
 
 class _Strict(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     @model_validator(mode="before")
     @classmethod
@@ -120,7 +122,7 @@ class Limits(_Strict):
 
 class Aliases(_Strict):
     domains: list[str] = Field(default_factory=list)
-    plus_separator: str | None = None
+    plus_separator: str | None = Field(default=None, min_length=1)
     header_priority: list[str] = Field(
         default_factory=lambda: ["Delivered-To", "X-Original-To", "To", "Cc"]
     )
@@ -143,12 +145,19 @@ class CredentialCommand(_Strict):
 class Disabled(_Strict):
     """Reserved position: only `enabled = false` validates (A§2.5)."""
 
-    enabled: Literal[False] = False
+    enabled: StrictBool = False
+
+    @field_validator("enabled")
+    @classmethod
+    def _stay_disabled(cls, enabled: bool) -> bool:
+        if enabled:
+            raise ValueError("this feature cannot be enabled in this version")
+        return enabled
 
 
 class Account(_Strict):
-    preset: str | None = None
-    host: str | None = None
+    preset: str | None = Field(default=None, min_length=1)
+    host: str | None = Field(default=None, min_length=1)
     port: int | None = Field(default=None, ge=1, le=65535)
     tls: Literal["implicit", "starttls"] | None = None
     login: str = Field(min_length=1)
@@ -176,11 +185,18 @@ class Account(_Strict):
 
 
 class Config(_Strict):
-    schema_version: Literal[1] = 1
+    schema_version: StrictInt = 1
     default_account: AccountId | None = None
     limits: Limits = Field(default_factory=Limits)
     accounts: dict[AccountId, Account] = Field(default_factory=dict)
     smtp: Disabled = Field(default_factory=Disabled)
+
+    @field_validator("schema_version")
+    @classmethod
+    def _known_version(cls, version: int) -> int:
+        if version != 1:
+            raise ValueError("unsupported schema_version")
+        return version
 
     @model_validator(mode="after")
     def _default_exists(self) -> Self:

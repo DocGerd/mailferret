@@ -1,7 +1,8 @@
 import pytest
+from pydantic import ConfigDict, ValidationError
 
 from mailferret.config import ConfigError, parse
-from mailferret.config.schema import LIMIT_CEILINGS
+from mailferret.config.schema import LIMIT_CEILINGS, _Strict
 
 ACCOUNT = """
 [accounts.work]
@@ -22,11 +23,35 @@ def test_empty_config_has_no_accounts() -> None:
     assert parse("").accounts == {}
 
 
+KEY_RULE = "secret-named keys are not allowed"
+
+
 @pytest.mark.parametrize("key", ["password", "token", "secret", "api_key", "Passphrase"])
 def test_secret_named_keys_rejected_without_echoing_value(key: str) -> None:
     with pytest.raises(ConfigError) as info:
         parse(ACCOUNT + f'{key} = "hunter2-value"\n')
+    assert KEY_RULE in str(info.value)
     assert "hunter2-value" not in str(info.value)
+
+
+@pytest.mark.parametrize(
+    "section", ["", "[accounts.work.aliases]", "[limits]", "[accounts.work.credential_command]"]
+)
+def test_secret_named_keys_rejected_in_every_section(section: str) -> None:
+    text = ACCOUNT if section == "" else ACCOUNT + section + "\n"
+    with pytest.raises(ConfigError) as info:
+        parse(text + 'token = "hunter2-value"\n')  # pii-check: ignore
+    assert KEY_RULE in str(info.value)
+    assert "hunter2-value" not in str(info.value)
+
+
+def test_secret_rule_holds_where_extra_keys_are_allowed() -> None:
+    class Loose(_Strict):
+        model_config = ConfigDict(extra="allow")
+
+    assert Loose.model_validate({"colour": "red"}).model_dump() == {"colour": "red"}
+    with pytest.raises(ValidationError, match=KEY_RULE):
+        Loose.model_validate({"api_key": "hunter2-value"})  # pii-check: ignore
 
 
 def test_unknown_key_rejected() -> None:
@@ -84,10 +109,7 @@ def test_preset_less_account_needs_host() -> None:
 
 @pytest.mark.parametrize("section", ["[smtp]", "[accounts.work.write]"])
 def test_write_and_smtp_reject_enabled(section: str) -> None:
-    ok = ACCOUNT + f"{section}\nenabled = false\n"
-    if section == "[smtp]":
-        ok = ACCOUNT + "[smtp]\nenabled = false\n"
-    parse(ok)
+    parse(ACCOUNT + f"{section}\nenabled = false\n")
     with pytest.raises(ConfigError):
         parse(ACCOUNT + f"{section}\nenabled = true\n")
 
@@ -115,3 +137,37 @@ def test_unknown_limit_rejected() -> None:
 def test_invalid_toml_error() -> None:
     with pytest.raises(ConfigError):
         parse("accounts = [")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        ACCOUNT.replace("port = 993", "port = true"),
+        ACCOUNT.replace("port = 993", 'port = "993"'),
+        ACCOUNT.replace("port = 993", "port = 993.0"),
+        "[limits]\nmax_page_size = true\n",
+        '[limits]\nmax_page_size = "50"\n',
+        "schema_version = true\n",
+        "schema_version = 2\n",
+        ACCOUNT + "[accounts.work.write]\nenabled = 0\n",
+        ACCOUNT + '[accounts.work.write]\nenabled = "false"\n',
+        "[smtp]\nenabled = 0\n",
+    ],
+)
+def test_toml_values_are_not_coerced(text: str) -> None:
+    with pytest.raises(ConfigError):
+        parse(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        ACCOUNT.replace('host = "imap.example.com"', 'host = ""'),
+        '[accounts.shop]\npreset = ""\nlogin = "shop@example.com"\n',
+        '[accounts.shop]\npreset = "x"\nhost = ""\nlogin = "shop@example.com"\n',
+        ACCOUNT + '[accounts.work.aliases]\nplus_separator = ""\n',
+    ],
+)
+def test_empty_strings_rejected(text: str) -> None:
+    with pytest.raises(ConfigError):
+        parse(text)

@@ -5,13 +5,12 @@ from __future__ import annotations
 import os
 import tempfile
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 from typing import Any
 
 import tomlkit
 from pydantic import ValidationError
-from tomlkit.items import Table
 
 from mailferret.config.paths import resolve_location
 from mailferret.config.schema import Config
@@ -31,13 +30,13 @@ def _describe(error: ValidationError) -> str:
 
 def parse(text: str) -> Config:
     try:
-        data = tomllib.loads(text)
+        return Config.model_validate(tomllib.loads(text))
     except tomllib.TOMLDecodeError as exc:
-        raise ConfigError(f"config is not valid TOML: {exc}") from None
-    try:
-        return Config.model_validate(data)
+        message = f"config is not valid TOML: {exc}"
     except ValidationError as exc:
-        raise ConfigError(_describe(exc)) from None
+        message = _describe(exc)
+    # Raised outside the handlers so __context__ holds neither the file text nor its values.
+    raise ConfigError(message)
 
 
 def load(
@@ -50,20 +49,33 @@ def load(
     except FileNotFoundError:
         return Config()
     except (OSError, UnicodeDecodeError) as exc:
-        raise ConfigError(f"cannot read config: {type(exc).__name__}") from None
-    return parse(text)
+        message = f"cannot read config: {type(exc).__name__}"
+    else:
+        return parse(text)
+    raise ConfigError(message)
 
 
-def _merge(target: Any, data: Mapping[str, Any]) -> None:
-    for key in [k for k in target if k not in data]:
+def _merge(target: Any, data: Mapping[str, Any], full: Mapping[str, Any]) -> None:
+    """Make `target` match `data`, leaving values that already equal a default untouched.
+
+    `full` is the same section with defaults included.
+    """
+    for key in [k for k in target if k not in full]:
         del target[key]
-    for key, value in data.items():
-        if isinstance(value, Mapping):
-            if not isinstance(target.get(key), Table):
-                target[key] = tomlkit.table()
-            _merge(target[key], value)
-        else:
-            target[key] = value
+    for key, default in full.items():
+        if key in data:
+            value = data[key]
+            if isinstance(value, Mapping):
+                if not isinstance(target.get(key), MutableMapping):
+                    target[key] = tomlkit.table()
+                _merge(target[key], value, default)
+            elif target.get(key) != value:
+                target[key] = value
+        elif key in target:
+            if isinstance(default, Mapping) and isinstance(target[key], MutableMapping):
+                _merge(target[key], {}, default)
+            elif target[key] != default:
+                del target[key]
 
 
 def write(
@@ -80,7 +92,11 @@ def write(
             doc = tomlkit.parse(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             doc = tomlkit.document()
-    _merge(doc, config.model_dump(mode="json", exclude_none=True))
+    data = {
+        "schema_version": config.schema_version,
+        **config.model_dump(mode="json", exclude_defaults=True),
+    }
+    _merge(doc, data, config.model_dump(mode="json", exclude_none=True))
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
