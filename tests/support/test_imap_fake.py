@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import tls_material_or_skip
 from tests.support.imap_fake import (
     Close,
     Command,
@@ -108,7 +109,7 @@ def test_callable_handler_sees_command(fake_imap: FakeImapServer) -> None:
     raw.read_until(b"\r\n")
     raw.send(b"t9 NOOP\r\n")
     assert raw.read_until(b"\r\n") == b"t9 OK seen\r\n"
-    assert seen == [Command("t9", "t9 NOOP", "NOOP", None)]
+    assert seen == [Command("t9", "t9 NOOP", "NOOP", None, conn=1)]
     raw.close()
 
 
@@ -119,10 +120,17 @@ def test_client_literal_is_logged_and_continued(fake_imap: FakeImapServer) -> No
     assert raw.read_until(b"\r\n") == b"+ go\r\n"
     raw.send(b"hello\r\n")
     assert raw.read_until(b"\r\n") == b"a1 OK done\r\n"
-    raw.send(b"a2 APPEND INBOX {3+}\r\nabc\r\n")
+    raw.send(b"a2 APPEND INBOX {3+}\r\nabc UID 7\r\n")
     assert raw.read_until(b"\r\n") == b"a2 OK done\r\n"
-    assert fake_imap.wire.count("<literal 5>") == 1
-    assert "<literal 3>" in fake_imap.wire
+    assert fake_imap.wire == [
+        "a1 APPEND INBOX {5}",
+        "<literal 5>hello",
+        "",
+        "a2 APPEND INBOX {3+}",
+        "<literal 3>abc",
+        " UID 7",
+    ]
+    assert [c.verb for c in fake_imap.commands] == ["APPEND", "APPEND"]
     raw.close()
 
 
@@ -135,6 +143,32 @@ def test_literals_can_be_refused() -> None:
         raw.send(b"a2 NOOP\r\n")
         assert raw.read_until(b"\r\n") == b"a2 OK done\r\n"
         raw.close()
+
+
+@pytest.mark.parametrize("flags", [{"literals": False}, {"literal_plus": False}])
+def test_non_synchronizing_literal_is_refused_and_bytes_become_a_command(
+    flags: dict[str, bool],
+) -> None:
+    payload = b"a9 UID STORE 1 +FLAGS (\\Seen)"
+    assert len(payload) == 29
+    with FakeImapServer(**flags) as server:
+        raw = Raw(server)
+        raw.read_until(b"\r\n")
+        raw.send(b"a1 SEARCH CHARSET UTF-8 TEXT {29+}\r\n" + payload + b"\r\n")
+        assert raw.read_until(b"\r\n") == b"a1 BAD literals refused\r\n"
+        assert raw.read_until(b"\r\n") == b"a9 OK done\r\n"
+        raw.close()
+        assert [(c.verb, c.sub) for c in server.commands] == [("UID", "STORE")]
+
+
+def test_literal_plus_is_logged_with_content_by_default(fake_imap: FakeImapServer) -> None:
+    raw = Raw(fake_imap)
+    raw.read_until(b"\r\n")
+    raw.send(b"a1 SEARCH CHARSET UTF-8 TEXT {5+}\r\nhello\r\n")
+    assert raw.read_until(b"\r\n") == b"a1 OK done\r\n"
+    assert fake_imap.wire == ["a1 SEARCH CHARSET UTF-8 TEXT {5+}", "<literal 5>hello", ""]
+    assert [c.verb for c in fake_imap.commands] == ["SEARCH"]
+    raw.close()
 
 
 def test_server_literal_exact_and_lying(fake_imap: FakeImapServer) -> None:
@@ -180,6 +214,22 @@ def test_stall_is_cut_by_client_timeout(fake_imap: FakeImapServer) -> None:
     raw.close()
 
 
+def test_lines_sent_after_a_stall_are_still_logged(fake_imap: FakeImapServer) -> None:
+    fake_imap.on("NOOP", [Stall()])
+    raw = Raw(fake_imap, timeout=0.3)
+    raw.read_until(b"\r\n")
+    raw.send(b"a1 NOOP\r\n")
+    with pytest.raises(TimeoutError):
+        raw.read_until(b"\r\n")
+    raw.send(b'a2 LOGIN user@example.com "dummy-password"\r\n')
+    fake_imap.wait_for_wire('a2 LOGIN user@example.com "dummy-password"')
+    raw.sock.settimeout(0.3)
+    with pytest.raises(TimeoutError):
+        raw.sock.recv(1)
+    raw.close()
+    fake_imap.wait_for("closed")
+
+
 def test_close_drops_connection(fake_imap: FakeImapServer) -> None:
     fake_imap.on("NOOP", ["* partial\r\n", Close()])
     raw = Raw(fake_imap)
@@ -222,6 +272,45 @@ def test_connections_run_independently(fake_imap: FakeImapServer) -> None:
         raw.close()
 
 
+def test_connection_accounting_and_attribution(fake_imap: FakeImapServer) -> None:
+    assert fake_imap.connections == 0
+    a = Raw(fake_imap)
+    a.read_until(b"\r\n")
+    b = Raw(fake_imap)
+    b.read_until(b"\r\n")
+    a.send(b"a1 NOOP\r\n")
+    assert a.read_until(b"\r\n") == b"a1 OK done\r\n"
+    b.send(b"b1 CAPABILITY\r\nb2 NOOP\r\n")
+    assert b.read_until(b"b2 OK done\r\n").endswith(b"b2 OK done\r\n")
+    assert fake_imap.connections == 2
+    assert [e for e in fake_imap.events if e.startswith("accepted:")] == [
+        "accepted:1",
+        "accepted:2",
+    ]
+    assert fake_imap.wire_of(1) == ["a1 NOOP"]
+    assert fake_imap.wire_of(2) == ["b1 CAPABILITY", "b2 NOOP"]
+    assert [(c.conn, c.verb) for c in fake_imap.commands if c.conn == 2] == [
+        (2, "CAPABILITY"),
+        (2, "NOOP"),
+    ]
+    assert [c.verb for c in fake_imap.commands_of(1)] == ["NOOP"]
+    assert len(fake_imap.wire) == 3
+    a.close()
+    b.close()
+
+
+def test_stop_leaves_no_threads_behind() -> None:
+    before = set(threading.enumerate())
+    server = FakeImapServer()
+    server.start()
+    raw = Raw(server)
+    raw.read_until(b"\r\n")
+    server.stop()
+    leaked = [t for t in threading.enumerate() if t not in before and t.is_alive()]
+    assert leaked == []
+    raw.close()
+
+
 def test_starttls_advertised_only_before_tls(
     fake_imap_tls: FakeImapServer, tls_material: TlsMaterial
 ) -> None:
@@ -233,6 +322,37 @@ def test_starttls_advertised_only_before_tls(
     assert b"STARTTLS" not in data[0]
     client.logout()
     assert "handshake" in fake_imap_tls.events
+
+
+def test_starttls_can_be_hidden_while_the_upgrade_still_works(tls_material: TlsMaterial) -> None:
+    with FakeImapServer(tls=tls_material, advertise_starttls=False) as server:
+        raw = Raw(server)
+        raw.read_until(b"\r\n")
+        raw.send(b"a1 CAPABILITY\r\n")
+        assert b"STARTTLS" not in raw.read_until(b"a1 OK done\r\n")
+        raw.send(b"a2 STARTTLS\r\n")
+        assert raw.read_until(b"\r\n") == b"a2 OK begin TLS\r\n"
+        raw.sock = tls_material.client_context().wrap_socket(raw.sock, server_hostname="127.0.0.1")
+        raw.sock.sendall(b"a3 NOOP\r\n")
+        assert raw.read_until(b"\r\n") == b"a3 OK done\r\n"
+        assert "handshake" in server.events
+        raw.close()
+
+
+def test_trusted_cert_for_another_name_fails_hostname_verification(
+    wrong_host_material: TlsMaterial,
+) -> None:
+    with FakeImapServer(tls=wrong_host_material) as server:
+        client = imaplib.IMAP4("127.0.0.1", server.port, timeout=TIMEOUT)
+        with pytest.raises(ssl.SSLCertVerificationError) as info:
+            client.starttls(wrong_host_material.client_context())
+        assert "mismatch" in info.value.verify_message
+        assert all(c.verb != "LOGIN" for c in server.commands)
+
+
+def test_cert_names_must_be_valid(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="invalid certificate name"):
+        make_tls_material(tmp_path, ("bad name\n[x]",))
 
 
 def test_untrusted_cert_fails_client_verification(fake_imap_tls: FakeImapServer) -> None:
@@ -288,6 +408,19 @@ def test_implicit_tls(tls_material: TlsMaterial) -> None:
             assert b"STARTTLS" not in tls.recv(256)
         server.wait_for("closed")
         assert "handshake" in server.events
+
+
+def test_openssl_missing_skips_locally_and_fails_in_ci(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    monkeypatch.setattr(os, "name", "posix")
+    monkeypatch.delenv("CI", raising=False)
+    with pytest.raises(pytest.skip.Exception):
+        tls_material_or_skip(tmp_path)
+    monkeypatch.setenv("CI", "true")
+    with pytest.raises(OpensslUnavailable):
+        tls_material_or_skip(tmp_path)
 
 
 def test_openssl_missing_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
