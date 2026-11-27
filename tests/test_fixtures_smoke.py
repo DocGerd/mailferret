@@ -118,8 +118,9 @@ def test_delimiter_forgery_forges_the_real_envelope_everywhere() -> None:
     msg = message_from_bytes(raw, policy=policy.default)
     end = re.compile(r"<<<END_UNTRUSTED id=[0-9a-f]{12}>>>")
     opening = re.compile(r"<<<MAILFERRET_UNTRUSTED kind=\w+ id=[0-9a-f]{12}>>>")
-    for field in ("Subject", "From", "To"):
-        assert end.search(str(msg[field])) or opening.search(str(msg[field])), field
+    assert end.search(str(msg["Subject"])) and opening.search(str(msg["Subject"]))
+    assert end.search(str(msg["From"]))
+    assert opening.search(str(msg["To"]))
     body = msg.get_content()
     assert end.search(body) and opening.search(body)
     assert b"<<<<" in raw
@@ -179,8 +180,9 @@ def test_hostile_html_has_head_script_and_entity_controls() -> None:
 def test_raw_cf_controls_sit_in_headers_and_plain_body() -> None:
     msg = message_from_bytes(_named()["cf_controls"].raw, policy=policy.default)
     cf = ("\u200b", "\u202e", "\u2066")
-    for value in (str(msg["Subject"]), str(msg["From"]), str(msg["X-Encoded"])):
-        assert any(c in value for c in cf), value
+    expected = {"Subject": cf, "From": cf[:2], "X-Encoded": cf}
+    for name, chars in expected.items():
+        assert all(c in str(msg[name]) for c in chars), name
     assert msg.get_content_type() == "text/plain"
     body = msg.get_content()
     assert all(c in body for c in cf) and "\u2069" in body
