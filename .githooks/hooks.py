@@ -7,6 +7,8 @@ Enable once per clone: git config core.hooksPath .githooks
 Honours the optional untracked .git/info/pii-patterns via scripts/pii_check.py.
 """
 
+from __future__ import annotations
+
 import subprocess
 import sys
 from pathlib import Path
