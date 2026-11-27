@@ -48,6 +48,8 @@ Policy: significant downloads (≥1M/month for core runtime deps), regular patch
 | pywin32-ctypes (keyring, Windows) | BORDERLINE (BSD-3, ~8M downloads/month, no OSV advisories, last release 2024-08) | accept as a keyring transitive; re-check with keyring |
 | jaraco.classes, jaraco.functools, importlib-metadata (<3.12) (keyring) | PASS (MIT / Apache-2.0, >150M downloads/month, no OSV advisories) | adopt as keyring transitives |
 | jaraco.context (keyring) | PASS with a floor: two OSV entries (GHSA-58pv-8j8x-9vj2 / PYSEC-2026-1469, path traversal) affect 5.2.0 to <6.1.0; 6.1.2 is current | the lock must resolve `>=6.1.0`; the dependency audit enforces it |
+| colorama (click, Windows; runtime) | PASS (BSD-3, ~299M downloads/month, no OSV advisories; mature, last release 0.4.6 in 2022-10) | adopt as a click transitive |
+| Dev-only indirect packages of vetted tools: ast-serialize, librt, mypy-extensions, pathspec (MPL-2.0), typing-extensions (PSF-2.0), pluggy, iniconfig, packaging, pygments (mypy, pytest) | accepted on the strength of `uv.lock` plus the `uv audit` CI job; licenses checked on PyPI (MIT, MPL-2.0, PSF-2.0, Apache-2.0 OR BSD-2-Clause, BSD-2-Clause) | dev-only, never shipped |
 | Windows job objects (T-06, T-17) | no package: own stdlib `ctypes` code | pywin32 not adopted |
 
 Transitive dependencies worth tracking:
