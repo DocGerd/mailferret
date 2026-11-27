@@ -1,0 +1,12 @@
+From: Alice <user@example.com>
+To: Bob <bob@example.com>
+Date: Mon, 01 Jan 2024 10:00:00 +0000
+Message-ID: <h2047@example.com>
+Subject: =?UTF-8?Q?Gr=C3=BC=C3=9Fe_aus_M=C3=BCnchen?= =?UTF-8?B?IOKAkyDml6XmnKzoqp4=?=
+X-Folded: first
+ second
+	third
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+Body.

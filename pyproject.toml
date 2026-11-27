@@ -17,7 +17,12 @@ dependencies = [
 mailferret = "mailferret.cli:main"
 
 [dependency-groups]
-dev = ["mypy>=2.4", "pytest>=9.2", "ruff>=0.17"]
+dev = [
+    "hypothesis>=6.170",
+    "mypy>=2.4",
+    "pytest>=9.2",
+    "ruff>=0.17",
+]
 
 [build-system]
 requires = ["uv_build>=0.13,<0.14"]

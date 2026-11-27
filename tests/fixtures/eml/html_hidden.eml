@@ -1,0 +1,23 @@
+From: Alice <user@example.com>
+To: Bob <bob@example.com>
+Date: Mon, 01 Jan 2024 10:00:00 +0000
+Message-ID: <hid@example.com>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+
+<html><head><title>MAILFERRET-CANARY title</title>
+<style>.h{display:none} /* MAILFERRET-CANARY style */</style>
+<script>var x = "MAILFERRET-CANARY script";</script></head><body>
+<p>visible</p>
+<span style="display:none">MAILFERRET-CANARY display</span>
+<span style="visibility:hidden">MAILFERRET-CANARY visibility</span>
+<span style="font-size:0">MAILFERRET-CANARY fontsize</span>
+<span style="opacity:0">MAILFERRET-CANARY opacity</span>
+<span style="color:#fff;background:#fff">MAILFERRET-CANARY white</span>
+<span style="position:absolute;left:-9999px">MAILFERRET-CANARY offscreen</span>
+<span hidden>MAILFERRET-CANARY hiddenattr</span>
+<span class="h">MAILFERRET-CANARY class</span>
+<!-- MAILFERRET-CANARY comment -->
+<p>zero&#8203;width &#8238;bidi&#8236; text</p>
+<a href="https://example.com/x">link</a> <img src="https://example.com/p.png">
+</body></html>

@@ -1,0 +1,19 @@
+From: Alice <user@example.com>
+To: Bob <bob@example.com>
+Date: Mon, 01 Jan 2024 10:00:00 +0000
+Message-ID: <f2231@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="b1"
+
+--b1
+Content-Type: text/plain; charset=utf-8
+
+See attachment.
+--b1
+Content-Type: application/octet-stream
+Content-Disposition: attachment;
+ filename*0*=UTF-8''na%C3%AFve%20;
+ filename*1*=report.txt
+
+data
+--b1--
