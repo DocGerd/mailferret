@@ -25,6 +25,7 @@ Phase: 2a done (scaffold F0, spikes V1–V4) and the architecture update that fo
 - Verification owned by agent tasks (ARCHITECTURE §10): item 7, the `gpg2`/`GPG_AGENT_INFO` branch warm and expired (B5); items 17 and 18 (P2 `--strict`; P3 runtime); item 23, the job object and the keyring probe on Windows and macOS (B4, B5); item 24, no server starts in an eval run (P3).
 - C4: research and run the Windows job-object and macOS `RLIMIT_AS` PDF worker memory caps on windows and macos CI runners, plus the cyclic page-tree and 100,000-page bombs (A§10 item 10). Until then T-06 scopes the memory guarantee to Linux.
 - Manual checks only a user can run: ARCHITECTURE §10 items 5, 7 (the client- or `wsl.exe`-launched part), 9, 14, 19, 21 and 22.
+- Task-owner notes from the architecture-update review: issue #14 (D2, D5, B4, B5, C4, E3, P3).
 - Parked: issue #10, commit-guard hardening. The guard stays best effort; `.githooks` and CI `scan` enforce.
 
 ## Contributor notes
