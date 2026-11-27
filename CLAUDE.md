@@ -27,12 +27,14 @@ A generic, read-only-by-default IMAP MCP server (`mailferret serve`, stdio) and 
 - GreenMail up/down (after D4): `docker compose -f tests/integration/docker-compose.yml up -d` / `... down -v`
 - Plugin validate (after P1): `claude plugin validate --strict .` (repo root: covers the marketplace and plugin manifests)
 - PII scan: `python3 scripts/pii_check.py` (tracked files) or `--staged`
+- Test helpers: fake IMAP server `tests/support/imap_fake` (fixtures `fake_imap`, `fake_imap_tls`); MIME/charset/PDF corpus `tests/fixtures`; Hypothesis strategies `tests/strategies`. TLS tests need the `openssl` CLI (skipped locally, fail in CI).
 
 ## Conventions
 - `src/` layout, type hints, `mypy --strict`, ruff, pytest; `uv` for everything.
 - One PR per PLAN task, small conventional commits, `Closes #n` where an issue exists.
 - Each task works in its own worktree and touches only its module, tests and fixtures.
-- Dependencies: only the vetted table in `docs/research/library-survey.md`. Runtime licenses permissive (MIT/BSD/Apache/PSF); dev-only tools may be MPL-2.0/LGPL (Hypothesis) if healthy. A new dependency needs vetting first.
+- Dependencies: only the vetted table in `docs/research/library-survey.md`, including every transitive package that lands in `uv.lock` (runtime vs dev-only row). Runtime licenses permissive (MIT/BSD/Apache/PSF); dev-only tools may be MPL-2.0/LGPL (Hypothesis) if healthy. A new dependency needs vetting first.
+- Parallel tasks that each add dependencies conflict on `pyproject.toml`/`uv.lock`: merge one, then resolve the other with `uv lock`.
 - Minimal comments and prose: only what the code cannot say; never pin decaying facts.
 - Tests never touch a real mailbox. Integration tests use GreenMail; `/smoke-test` (manual, the user's own account) never runs in CI.
 
@@ -53,11 +55,17 @@ A generic, read-only-by-default IMAP MCP server (`mailferret serve`, stdio) and 
   - `mf-reviewer`, `mf-security-reviewer`: the gate
   - `mf-docs-writer`: prose
 - Briefs give scope, a path allowlist, a definition of done, and ask for a concise summary.
+- Never run worktree cleanup (`git worktree remove/prune`) while agents are being spawned into worktrees.
+- Pyright "import could not be resolved" diagnostics from agent worktrees are noise (no venv there); trust `uv run mypy`.
 
 ## Review gate (PLAN §4)
 - Every module PR gets a fresh-agent review: `/review-module <task> <PR>` runs `mf-reviewer` and `mf-security-reviewer` in parallel.
 - One review thread per finding. Every finding is fixed or answered before the next dependent task starts. Merge needs CI green and both verdicts approve.
 - Reviewers read via `git show origin/<branch>:<path>` or their own worktree, never by checking out in the main tree.
+- Reviews are posted as event COMMENT with the verdict (approve/request-changes) on the first body line; GitHub rejects APPROVE from the author account.
+- Threads are for defects only; hardening ideas go in a "For task owners" list in the review body and are collected on issue #14.
+- Re-verify fixes by resuming the same reviewers (SendMessage) on the new head SHA, not fresh ones.
+- Fixers never merge main into a PR branch: the merge commit makes `gh pr merge --rebase` fail ("can't be rebased"). On a conflict, stop and decide (squash needs the user's OK).
 
 ## PII guard
 - Commit identity: the GitHub noreply address only.
