@@ -10,6 +10,7 @@ from typing import Literal
 Scope = Literal["user", "project", "local"]
 
 _FILE = "claude_desktop_config.json"
+_WSL_MOUNT = Path("/mnt")
 
 
 @dataclass(frozen=True)
@@ -34,12 +35,34 @@ def _regular(platform: str, env: Mapping[str, str], home: Path) -> Path | None:
     return home / ".config" / "Claude" / _FILE
 
 
-def desktop_candidates(platform: str, env: Mapping[str, str], home: Path) -> list[Candidate]:
+def _wsl_candidates(mount: Path) -> list[Candidate]:
+    found: list[Candidate] = []
+    for drive in sorted(mount.glob("[a-zA-Z]")):
+        for user in sorted((drive / "Users").glob("*")):
+            regular = user / "AppData" / "Roaming" / "Claude" / _FILE
+            if regular.is_file():
+                found.append(Candidate(regular, "regular"))
+            packages = user / "AppData" / "Local" / "Packages"
+            found.extend(Candidate(p, "msix") for p in sorted(packages.glob("Claude_*")))
+    return found
+
+
+def desktop_candidates(
+    platform: str,
+    env: Mapping[str, str],
+    home: Path,
+    *,
+    wsl_mount: Path = _WSL_MOUNT,
+) -> list[Candidate]:
     """Existing Desktop config files for the platform.
 
-    MSIX package directories (family suffix globbed) are reported as `msix`;
-    callers must not rely on their config path (A§9.6).
+    Under WSL (`WSL_DISTRO_NAME` set on Linux) the Windows-side files under
+    `<wsl_mount>/<drive>/Users/*/` are returned instead of the Linux path; no
+    Windows binary is run. MSIX package directories (family suffix globbed) are
+    reported as `msix`; callers must not rely on their config path (A§9.6).
     """
+    if platform == "linux" and env.get("WSL_DISTRO_NAME"):
+        return _wsl_candidates(wsl_mount)
     found: list[Candidate] = []
     regular = _regular(platform, env, home)
     if regular is not None and regular.is_file():
