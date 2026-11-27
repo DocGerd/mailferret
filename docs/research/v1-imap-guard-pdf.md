@@ -10,7 +10,7 @@ Two earlier claims are REFUTED: `_command` is not the single choke point, and th
 |---|---|---|---|
 | 1 | `_command` is the single choke point | REFUTED | `search`, `sort`, `thread`, `append`, `multiappend` use `_new_tag()` + `send()`; a `_command`-only guard missed `UID SEARCH/SORT/THREAD` and let `APPEND` out |
 | 1a | Guard `_new_tag` and every `send` | VERIFIED | Verbs seen equal wire verbs on all four Pythons. 19 mutations (rw `SELECT`, `STORE` variants, `EXPUNGE`, `APPEND`, `CREATE`, `DELETE`, `RENAME`, `SUBSCRIBE`, `COPY`, `MOVE`, raw `STORE`, `IDLE`, `BODY[]`/`RFC822`/`RFC822.TEXT` fetches) raise before any byte is sent; `BODY.PEEK[]`, `RFC822.HEADER`, `RFC822.SIZE` pass. The FETCH check is a denylist here; A§6's allowlist is D2's |
-| 1b | Un-armed `send` fails closed | VERIFIED | The armed line is vetted before any byte is written and may not contain a line break before its closing CRLF. It must end in CRLF, except SEARCH, SORT and THREAD: imapclient's `_raw_command` sends their line unterminated and the CRLF separately, so only they may announce a literal or leave the line open. An unterminated or literal-bearing FETCH is refused (probes: `UID FETCH 1 (FLAGS` then ` BODY[])`; a literal inside `HEADER.FIELDS` then `BODY[]`). After the armed line only these `send`s are allowed: literal bytes of the announced length (sync only after this tag's `+` was read; `{n+}` at once), a space, a fragment without line breaks (SEARCH/SORT/THREAD), the closing CRLF, AUTHENTICATE replies (`fullmatch`), `DONE` (case-insensitive) in an active IDLE. A tagged completion closes the gate, so bytes after a refused sync literal or after AUTHENTICATE raise. Removing the gate, the line-break check, the CRLF-or-announcement check, the literal refusal, the continuation gate, the tagged close or `fullmatch` each fails tests. The wire-level embedded-CRLF test proves the effect on 3.11 and 3.12 only (3.13+ imaplib rejects control characters itself); a stub-based test runs the mixin's own check on every minor |
+| 1b | Un-armed `send` fails closed | VERIFIED | The armed line is vetted before any byte is written and may not contain a line break before its closing CRLF. It must end in CRLF, except SEARCH, SORT and THREAD: imapclient's `_raw_command` sends their line unterminated and the CRLF separately, so only they may announce a literal or leave the line open. A line ending in `{n}` or `{n+}` counts as an announcement whatever precedes it (`({n}` and `Date{n}` included). An unterminated or literal-bearing FETCH is refused (probes: `UID FETCH 1 (FLAGS` then ` BODY[])`; a literal inside `HEADER.FIELDS` then `BODY[]`, spaced or not, sync and `{n+}`). `_new_tag` refuses to re-arm while a command is open, awaiting a continuation, in a literal, in AUTHENTICATE or in IDLE, so a re-armed line cannot complete a half-sent one. After the armed line only these `send`s are allowed: literal bytes of the announced length (sync only after this tag's `+` was read; `{n+}` at once), a space, a fragment without line breaks (SEARCH/SORT/THREAD), the closing CRLF, AUTHENTICATE replies (`fullmatch`), `DONE` (case-insensitive) in an active IDLE. A tagged completion closes the gate, so bytes after a refused sync literal or after AUTHENTICATE raise. Removing the gate, the line-break check, the CRLF-or-announcement check, the literal refusal (also the space-led-only regex), the re-arm refusal, the continuation gate, the tagged close or `fullmatch` each fails tests. The wire-level embedded-CRLF test proves the effect on 3.11 and 3.12 only (3.13+ imaplib rejects control characters itself); a stub-based test runs the mixin's own check on every minor |
 | 2 | `fetch`, `noop`, `idle`, `expunge` use `_command`; `UID` is `args[0]` | VERIFIED | `_command` logged `UID FETCH`, `NOOP`, `IDLE`, `EXPUNGE` |
 | 3 | Guard runs before imaplib's state check | PARTLY | `imaplib.uid()` checks state first (`imaplib.error`). Both fail closed; tests accept either |
 | 4 | `DONE` bypasses `_command` | VERIFIED | Wire showed `IDLE`, `DONE`; `_command` never saw `DONE` |
@@ -30,6 +30,8 @@ Two earlier claims are REFUTED: `_command` is not the single choke point, and th
 | 17 | Linux `RLIMIT_AS` in the worker | VERIFIED (not re-run) | 512 MiB: `import pypdf` fine; 64 MiB allocations hit `MemoryError` after 7; uncapped 2.5 GiB succeeded; parent survived |
 | 18 | Windows job object; macOS | OPEN | Owner C4, windows and macos CI runners (below) |
 | 19 | imapclient debug logging (T-03/T-21) | VERIFIED | Stock, root at DEBUG: `imapclient.imaplib` logs every server line (`< ...`), `imapclient.imapclient` logs commands and `Logged in as`. `LOGIN` is redacted (password never appeared); AUTHENTICATE logging not exercised. `debug` forced to 0 leaves `imapclient.imapclient` and `imapclient.util`. `imapclient.util` warns with the raw bytes of an 8-bit NO text and of `str(Address)` (the corpus stringifies one on purpose); a BAD text (imaplib raises first) and an 8-bit folder name logged nothing here. A WARNING pin with `propagate = False` has no handler, so `logging.lastResort` writes it to stderr. A pin at `CRITICAL + 1` with `propagate = False` and a `NullHandler` gives no `imapclient*` record and empty stderr. `disabled = True` on the parent does not cover `imapclient.util` |
+| 20 | A `str` secret passed to `login` stays out of exceptions (T-02) | REFUTED for non-ASCII | imaplib's ASCII encoding raises `UnicodeEncodeError` before any byte is sent, with the secret in `args` and `object` (quoted on 3.11, bare on 3.14) and the traceback. With an `isascii()` check, `plain_login` sends UTF-8 through the gate; without AUTH=PLAIN a typed error raised outside any `except` leaves no secret in args, repr, str, traceback, `__context__` or captured output |
+| 21 | The logger pin keeps server text out of output (T-03/T-21) | REFUTED for exception text | The `select_folder` NO text `café-Needle rejected` is in the raised `IMAPClientError`; a handler that logs `str(exc)` or a traceback leaks it past the logger pin. A fixed-code mapper keeps it out of every log record, stdout/stderr and the surfaced string, for NO and BAD |
 
 Wire survey (3.14): `CAPABILITY, LOGIN, CAPABILITY, CAPABILITY, NAMESPACE, LIST, STATUS, EXAMINE, UID SEARCH, UID SORT, UID THREAD, UID FETCH, NOOP, ID, UNSELECT, LOGOUT`; the `send` guard saw 16, `_command` 13.
 
@@ -43,11 +45,12 @@ Wire survey (3.14): `CAPABILITY, LOGIN, CAPABILITY, CAPABILITY, NAMESPACE, LIST,
 ## Decisions for A§10
 
 1. Item 1: one guard mixin for `IMAP4WithTimeout` and `IMAP4_TLS`, from an `IMAPClient._create_IMAP4` override (row 6).
-   - Commands: `_new_tag` arms; the first `send` must parse as `tag [UID] VERB` and is vetted (allowlist, FETCH items) before any byte is written. It must end in CRLF; only SEARCH/SORT/THREAD may be unterminated or announce a literal. Later `send`s must match a mid-command shape (row 1b), else `ReadOnlyViolation`. Literal bytes wait for this tag's `+`; a tagged completion closes the gate. `_command` is overridden for a clearer error, not as the guarantee.
-   - A failed vet leaves the gate armed, so a later `send` is parsed as a command line (fails closed). D2 resets the gate on abort and reconnect. D2 tests: a bare tagged line through `send` raises; a line break in the armed line raises; the fragments `UID FETCH 1 (FLAGS` + ` BODY[])` and a literal in a FETCH raise; literal bytes before `+` or after a tagged BAD raise; bytes after a completed AUTHENTICATE raise.
+   - Commands: `_new_tag` arms; the first `send` must parse as `tag [UID] VERB` and is vetted (allowlist, FETCH items) before any byte is written. It must end in CRLF; only SEARCH/SORT/THREAD may be unterminated or announce a literal (`{n}` or `{n+}` ending the line, whatever precedes it). `_new_tag` refuses to re-arm while a command is in flight (open, await, literal, auth, idle). Later `send`s must match a mid-command shape (row 1b), else `ReadOnlyViolation`. Literal bytes wait for this tag's `+`; a tagged completion closes the gate. `_command` is overridden for a clearer error, not as the guarantee.
+   - A failed vet leaves the gate armed, so a later `send` is parsed as a command line (fails closed). D2 resets the gate on abort and reconnect. D2 tests: a bare tagged line through `send` raises; a line break in the armed line raises; the fragments `UID FETCH 1 (FLAGS` + ` BODY[])` and a literal in a FETCH raise, including the unspaced `({n}` and `({n+}` forms; `_new_tag` mid-command raises; literal bytes before `+` or after a tagged BAD raise; bytes after a completed AUTHENTICATE raise.
    - Reads: `read(size)` aborts over the active literal cap and the per-command total; the caller sets both per command from the fetched item's L-nn (L-05 header, L-02 part, L-08 attachment, L-01 full fallback), default the smallest, reset in `_new_tag`. Line cap: set `imaplib._MAXLINE` from L-20 once at startup (process-global; L-20's 1 MiB exceeds the stdlib 1,000,000). Line overflow raises `error`: treat `error` and `abort` as fatal, discard the session.
    - STARTTLS: override `_command_complete`; probe by feature, not version: `_readbuf` if the attribute exists, else `file.peek(1)`; then `MSG_PEEK`; restore the socket timeout.
-   - Logging: `debug` is a property that reads 0 and ignores sets; the `imapclient` logger is set to `CRITICAL + 1` with `propagate = False` and a `NullHandler` (WARNING is not enough, row 19). Both are required. Pass only `str` to `login`; never stringify an `Address` (format addresses in `content/`). Test: a corpus with an 8-bit NO and BAD text, folder name and ENVELOPE address, at root DEBUG, records no `imapclient*` LogRecord (via a record factory: a root handler never sees a non-propagating logger) and leaves captured stderr (`capfd`) empty; it fails with the WARNING pin.
+   - Logging: `debug` is a property that reads 0 and ignores sets; the `imapclient` logger is set to `CRITICAL + 1` with `propagate = False` and a `NullHandler` (WARNING is not enough, row 19). Both are required. Pass only `str` to `login`; never stringify an `Address` (format addresses in `content/`). Never log or format `imaplib`/`imapclient` exception messages or tracebacks (they carry server text, folder names and NO/BAD texts); map exceptions to fixed error codes. Test: a corpus with an 8-bit NO and BAD text, folder name and ENVELOPE address, at root DEBUG, records no `imapclient*` LogRecord (via a record factory: a root handler never sees a non-propagating logger) and leaves captured stderr (`capfd`) empty; it fails with the WARNING pin. A second test on the same 8-bit fake asserts the 8-bit NO and BAD text (`café-Needle rejected`) appears in no log record, no captured stdout/stderr and no surfaced error string of the error-mapping helper.
+   - Credentials: check `isascii()` on username and secret before `LOGIN` (otherwise imaplib raises `UnicodeEncodeError` carrying the secret). A non-ASCII secret goes to AUTHENTICATE PLAIN (UTF-8, RFC 4616) when advertised, else a typed credential error with fixed text, raised outside any `except` so no `__context__` holds the original. Test on the `imap/` login path: the secret is absent from the exception's args, repr, str and traceback and from captured output.
    - Private API: pin imapclient; run the wire-survey, send-gate and STARTTLS tests on every supported minor. The wire-level embedded-CRLF test is meaningful on 3.11/3.12 only; keep both in the D2 CI matrix, and keep the stub-based test of the mixin's own check, which holds on every minor.
 2. Item 2: ESEARCH not exposed or used; plain `UID SEARCH`. L-20 is never raised to fit a SEARCH response; candidates are bounded by windowed UID ranges or the overflow maps to `limit_exceeded`.
 3. Item 10:
@@ -64,7 +67,8 @@ Wire survey (3.14): `CAPABILITY, LOGIN, CAPABILITY, CAPABILITY, NAMESPACE, LIST,
 - T-08, A§4, A§6 step 6: one fixed L-02 literal cap breaks the L-08 and L-01 fetches; the cap is per command (decision 1).
 - T-08, L-nn: the per-command response total has no row in SECURITY §5; a batch of L-25 UIDs times L-02 is far above L-19. Needs a new L-nn with a `[limits]` key.
 - L-15, L-20: without ESEARCH, `UID SEARCH` returns every match on one line (about 8 bytes per UID); above roughly 130k matches it exceeds L-20 and the session aborts.
-- T-03, T-21: "imaplib's debug output is never enabled" is not enough. imapclient sets `debug = 5` after construction (a constructor-time override cannot zero it), and its loggers carry server lines, search criteria and the username. `imapclient.util` also warns with raw 8-bit server bytes, so a WARNING pin leaks to stderr. Needs both controls of decision 1.
+- T-03, T-21: "imaplib's debug output is never enabled" is not enough. imapclient sets `debug = 5` after construction (a constructor-time override cannot zero it), and its loggers carry server lines, search criteria and the username. `imapclient.util` also warns with raw 8-bit server bytes, so a WARNING pin leaks to stderr. Needs both controls of decision 1. Exception messages also carry server text (row 21): D2 maps them to fixed codes and never logs them.
+- T-02: its verification covers exceptions raised from `auth/`; `login` in `imap/` raises `UnicodeEncodeError` with the secret in `args` (row 20). Extend the test to the `imap/` login path.
 - T-10: "un-armed sends are refused" must be a shape gate (decision 1): imapclient arms SEARCH/SORT/THREAD with an unterminated line, so "every armed line ends in CRLF" is false for them. Literal bytes are gated on the `+` continuation.
 - T-06: "set pypdf limits from limits.py" must name the fields (above) and derive `page_tree_maximum_*` from L-09.
 
@@ -75,7 +79,7 @@ Not edited here. This table is the single list issue #7 points to: apply every r
 | Edit | Owner |
 |---|---|
 | A§10.1, A§6, T-10: hook is `_new_tag` + `send` with the fail-closed gate; allowlist FETCH items; D2 resets the gate on abort and reconnect | SECURITY follow-up (text), D2 (code) |
-| T-10, R2: armed line ends in CRLF (SEARCH/SORT/THREAD may be unterminated); literal announcements refused except in SEARCH/SORT/THREAD; tests for the `UID FETCH 1 (FLAGS` + ` BODY[])` and literal-in-FETCH probes | D2 |
+| T-10, R2: armed line ends in CRLF (SEARCH/SORT/THREAD may be unterminated); literal announcements refused except in SEARCH/SORT/THREAD; `_new_tag` refuses to re-arm mid-command; tests for the `UID FETCH 1 (FLAGS` + ` BODY[])` and literal-in-FETCH probes, spaced and unspaced (`({n}`), sync and `{n+}`, and for `_new_tag` mid-command | D2 |
 | T-10, R1: sync literal bytes only after this tag's `+` (`{n+}` at once); AUTHENTICATE replies match with `fullmatch`; the gate closes on tagged completion; `{n+}` bytes only if LITERAL+ was advertised; tests for bytes before `+`, after a tagged BAD, and after AUTHENTICATE | D2 |
 | T-10 tests: the line-break check is exercised on every minor by a stub-based test; the wire-level CRLF test counts on 3.11/3.12 only, so the CI matrix keeps both | D2 |
 | A§2.2, T-07: reword buffered-bytes sentence; probe by feature (`_readbuf`, then `file.peek`, then `MSG_PEEK`); STARTTLS injection test on every supported minor in CI | SECURITY follow-up, D1 |
@@ -83,7 +87,8 @@ Not edited here. This table is the single list issue #7 points to: apply every r
 | T-08: wording "bounded at L-20 plus a bounded overshoot"; `imaplib._MAXLINE` set once, process-global | SECURITY follow-up, D2 |
 | New L-nn: per-command response total, with a `[limits]` key and ceiling | SECURITY follow-up (before D2) |
 | L-15, L-20: windowed UID ranges for SEARCH or `limit_exceeded`; L-20 never raised | SECURITY follow-up, D2 |
-| T-03, T-21: `debug` forced to 0; `imapclient` logger at `CRITICAL + 1`, `propagate = False`, `NullHandler`; `login` gets `str` only; never stringify `Address` (format in `content/`); corpus test with 8-bit NO/BAD, folder and ENVELOPE values asserting no record and empty `capfd` stderr | SECURITY follow-up, D2, `content/` tasks |
+| T-03, T-21: `debug` forced to 0; `imapclient` logger at `CRITICAL + 1`, `propagate = False`, `NullHandler`; `login` gets `str` only; never stringify `Address` (format in `content/`); corpus test with 8-bit NO/BAD, folder and ENVELOPE values asserting no record and empty `capfd` stderr; D2 never logs or formats `imaplib`/`imapclient` exception messages or tracebacks and maps them to fixed error codes, with a corpus assertion that an 8-bit NO text is in no record, no output and no surfaced error string | SECURITY follow-up, D2, `content/` tasks |
+| T-02, T-03: `isascii()` check on username and secret before `LOGIN`; non-ASCII secret to AUTHENTICATE PLAIN (UTF-8) or a typed credential error raised outside any `except`; extend the T-02 test to the `imap/` login path with a non-ASCII secret (absent from args, repr, str, traceback, output) | D2, `auth/` |
 | T-06, L-09, L-10: pypdf fields capped at `pdf_stream_bytes`; `page_tree_*` derived from L-09; cyclic-tree and 100,000-page fixtures | SECURITY follow-up, C4 |
 | T-06, A§10.10: Windows job object and macOS `RLIMIT_AS`, researched and run on windows and macos CI runners; add a STATUS open item | C4 |
 
@@ -97,6 +102,7 @@ The pypdf script runs with `--with pypdf==7.2.0`.
 
 ~~~python
 # test_v1_hook.py  (throwaway; 127.0.0.1 fakes only)
+import base64
 import imaplib
 import logging
 import os
@@ -108,10 +114,11 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 
 import pytest
 from imapclient import IMAPClient
-from imapclient.exceptions import IMAPClientError
+from imapclient.exceptions import IMAPClientAbortError, IMAPClientError, LoginError
 from imapclient.imap4 import IMAP4WithTimeout
 from imapclient.tls import IMAP4_TLS
 
@@ -122,9 +129,10 @@ UID_OK = {"SEARCH", "FETCH", "SORT", "THREAD"}
 SEEN_ITEMS = re.compile(rb"BODY\[|BINARY\[|RFC822(?!\.(?:HEADER|SIZE)\b)", re.I)
 CMD = re.compile(rb"^(\S+) (?:(UID) )?([A-Za-z]+)")
 MAX_LITERAL, MAX_RESPONSE = 1000, 2000
-ANN_END = re.compile(rb" \{(\d+)(\+?)\}\r\n$")
-ANN_START = re.compile(rb"^ ?\{(\d+)(\+?)\}\r\n")
+ANN_END = re.compile(rb"\{(\d+)(\+?)\}\r\n$")
+ANN_START = re.compile(rb"^ ?\{(\d+)(\+?)\}\r\n")  # imapclient sends " {n}\r\n"
 AUTH_REPLY = re.compile(rb"[A-Za-z0-9+/=]*|\*|\r\n")  # fullmatch
+IN_FLIGHT = {"open", "await", "literal", "auth", "idle"}
 RAW_VERBS = {"SEARCH", "SORT", "THREAD"}  # imapclient `_raw_command`: unterminated line, literals
 MUTATING = {"SELECT", "STORE", "EXPUNGE", "APPEND", "CREATE", "DELETE", "RENAME",
             "COPY", "MOVE", "SUBSCRIBE", "UNSUBSCRIBE", "UID STORE", "UID COPY",
@@ -137,6 +145,33 @@ def report(key, value):
 
 class ReadOnlyViolation(Exception):
     pass
+
+
+class CredentialError(Exception):
+    """Fixed text; never carries the credential."""
+
+
+def login_checked(c, user, secret):
+    if user.isascii() and secret.isascii():
+        return c.login(user, secret)
+    if b"AUTH=PLAIN" in c.capabilities():
+        return c.plain_login(user, secret)  # PLAIN carries UTF-8 (RFC 4616)
+    raise CredentialError("non_ascii_credential")  # outside any `except`: no __context__
+
+
+def error_code(exc):
+    """Fixed codes only: never str(exc), repr(exc), exc.args or a traceback."""
+    if isinstance(exc, ReadOnlyViolation):
+        return "read_only_violation"
+    if isinstance(exc, CredentialError):
+        return "credential_error"
+    if isinstance(exc, (imaplib.IMAP4.abort, IMAPClientAbortError)):
+        return "session_aborted"
+    if isinstance(exc, LoginError):
+        return "login_failed"
+    if isinstance(exc, (IMAPClientError, imaplib.IMAP4.error)):
+        return "imap_error"
+    return "internal_error"
 
 
 class GuardMixin:
@@ -181,6 +216,8 @@ class GuardMixin:
         return super()._command(name, *args)
 
     def _new_tag(self):
+        if self.strict and self._state in IN_FLIGHT:
+            raise ReadOnlyViolation(f"new command while {self._state}")
         self._state = "armed"
         self._lit_left = 0
         self._budget = 0
@@ -350,10 +387,11 @@ def client_class(plain_cls, tls_cls):
 
 class Fake:
     def __init__(self, mode="normal", ctx=None, implicit=False, size=5000, literal_plus=False,
-                 eightbit=False):
+                 eightbit=False, auth_plain=False):
         self.mode, self.ctx, self.implicit, self.size = mode, ctx, implicit, size
         self.literal_plus = literal_plus
         self.eightbit = eightbit
+        self.auth_plain = auth_plain
         self.auth_replies = []
         self.wire, self.events = [], []
         self.sent = threading.Event()
@@ -370,6 +408,7 @@ class Fake:
     def caps(self, tls):
         base = "IMAP4rev1 IDLE ID UNSELECT NAMESPACE MOVE SORT THREAD=REFERENCES"
         base += " LITERAL+" if self.literal_plus else ""
+        base += " AUTH=PLAIN" if self.auth_plain else ""
         return base if tls or self.implicit else base + " STARTTLS"
 
     def run(self):
@@ -902,16 +941,19 @@ def test_pending_probe_kernel_only_bytes():
 
 
 class Recorder:
-    """Records every `imapclient*` LogRecord created, wherever it is routed."""
+    """Records every LogRecord created whose logger name starts with `prefix`, wherever it is routed."""
+
+    def __init__(self, prefix="imapclient"):
+        self.prefix = prefix
 
     def __enter__(self):
         self.items = []
         self.old = logging.getLogRecordFactory()
-        old, items = self.old, self.items
+        old, items, prefix = self.old, self.items, self.prefix
 
         def factory(*a, **kw):
             rec = old(*a, **kw)
-            if rec.name.startswith("imapclient"):
+            if rec.name.startswith(prefix):
                 items.append((rec.name, rec.levelname, rec.getMessage()))
             return rec
 
@@ -961,13 +1003,13 @@ def _corpus(plain, only=None):
     c.logout()
 
 
-def _run_logged(fn, pin=None):
+def _run_logged(fn, pin=None, prefix="imapclient"):
     lg = logging.getLogger("imapclient")
     saved = (lg.level, lg.propagate, lg.disabled, list(lg.handlers))
     if pin:
         pin(lg)
     try:
-        with Recorder() as rec:
+        with Recorder(prefix) as rec:
             fn()
     finally:
         lg.setLevel(saved[0])
@@ -1238,6 +1280,158 @@ def test_auth_state_closes_on_tagged_completion():
     for stray in (b"AAAA", b"AAAA\n", b"\r\n"):
         with pytest.raises(ReadOnlyViolation):
             im.send(stray)
+
+
+@pytest.mark.parametrize("plus", [b"", b"+"], ids=["sync", "literal+"])
+@pytest.mark.parametrize("line", [
+    b"X1 UID FETCH 1 (BODY.PEEK[HEADER.FIELDS ({7%s}\r\n",
+    b"X1 UID FETCH 1 (BODY.PEEK[HEADER.FIELDS (Date{7%s}\r\n",
+    b"X1 NOOP{3%s}\r\n",
+], ids=["after-paren", "after-atom", "noop"])
+def test_unspaced_literal_announcement_refused_outside_raw_verbs(line, plus):
+    st = _stub()
+    with pytest.raises(ReadOnlyViolation):
+        st.send(line % plus)
+    assert st.sock.wrote == []
+
+
+@pytest.mark.parametrize("plus", [b"", b"+"], ids=["sync", "literal+"])
+def test_unspaced_literal_fetch_probe_never_reaches_the_wire(plus):
+    """Round-3 probe: `({n}` in a FETCH, then a re-armed NOOP that completes it with `BODY[]`."""
+    s, c = opened()
+    im = c._imap
+    t1 = im._new_tag()
+    with pytest.raises(ReadOnlyViolation):
+        im.send(t1 + b" UID FETCH 1 (BODY.PEEK[HEADER.FIELDS ({%d%s}\r\n" % (len(t1) + 5, plus))
+    t2 = im._new_tag()  # the gate stayed armed, so this re-arms; the completion vets as a NOOP
+    im.send(t2 + b" NOOP)] BODY[])\r\n")
+    time.sleep(0.3)
+    report("wire (unspaced literal probe)", s.wire)
+    assert not any("FETCH" in v for v in s.wire)
+
+
+@pytest.mark.parametrize("state", sorted(IN_FLIGHT))
+def test_new_tag_refuses_while_a_command_is_in_flight(state):
+    s, c = opened()
+    im = c._imap
+    im._state = state
+    with pytest.raises(ReadOnlyViolation):
+        im._new_tag()
+    assert im._state == state
+    for ok in ("armed", "closed"):
+        im._state = ok
+        im._new_tag()
+        assert im._state == "armed"
+
+
+def test_new_tag_refuses_after_a_real_raw_announcement():
+    s, c = opened()
+    im = c._imap
+    tag = im._new_tag()
+    im.send(tag + b" UID SEARCH CHARSET UTF-8 SUBJECT ({3}\r\n")
+    assert im._state == "await"
+    with pytest.raises(ReadOnlyViolation):
+        im._new_tag()
+    time.sleep(0.2)
+    assert "NOOP" not in s.wire
+
+
+NON_ASCII = "S3cr\u00e9tPw"
+
+
+def _everything_about(exc):
+    return [repr(exc), str(exc), "".join(map(str, exc.args)), "".join(traceback.format_exception(exc))]
+
+
+def test_stock_login_leaks_a_non_ascii_secret_in_the_exception():
+    """Control: the failure the check prevents."""
+    s, c = connect()
+    with pytest.raises(UnicodeEncodeError) as ei:
+        c.login("user@example.com", NON_ASCII)
+    report("stock login, non-ASCII secret: leak in repr/args", (NON_ASCII in repr(ei.value), NON_ASCII in str(ei.value.args)))
+    assert NON_ASCII in repr(ei.value) or NON_ASCII in str(ei.value.args) or NON_ASCII in str(ei.value.object)
+    assert s.wire == ["CAPABILITY"]
+
+
+@pytest.mark.parametrize("user,secret", [("user@example.com", NON_ASCII), ("us\u00e9r@example.com", "x")],
+                         ids=["secret", "username"])
+def test_non_ascii_credential_raises_a_typed_error_without_the_secret(user, secret, capfd):
+    s, c = connect()
+    err = None
+    with Recorder("") as rec:
+        try:
+            login_checked(c, user, secret)
+        except Exception as e:  # noqa: BLE001
+            err = e
+    cap = capfd.readouterr()
+    assert isinstance(err, CredentialError)
+    assert err.__context__ is None and err.__cause__ is None
+    for text in _everything_about(err) + [cap.out, cap.err] + [m for _, _, m in rec.items]:
+        assert NON_ASCII not in text and "S3cr" not in text and "\u00e9" not in text
+    assert s.wire == ["CAPABILITY"]
+
+
+def test_non_ascii_secret_goes_to_authenticate_plain_as_utf8():
+    s, c = connect(auth_plain=True)
+    login_checked(c, "user@example.com", NON_ASCII)
+    assert "AUTHENTICATE" in s.wire and "LOGIN" not in s.wire
+    assert base64.b64decode(s.auth_replies[0].strip()) == b"\x00user@example.com\x00" + NON_ASCII.encode()
+
+
+def test_ascii_credentials_still_use_login():
+    s, c = connect(auth_plain=True)
+    login_checked(c, "user@example.com", "x")
+    assert "LOGIN" in s.wire and "AUTHENTICATE" not in s.wire
+
+
+NEEDLE_CORPUS = ("Needle", "rejected", "caf")
+
+
+def test_imap_error_text_reaches_no_log_record_output_or_surfaced_string(capfd):
+    """`caf\u00e9-Needle rejected` (NO and BAD) is in the exceptions; only fixed codes get out."""
+    log = logging.getLogger("proto.errors")
+    surfaced = []
+
+    def surface(exc):
+        code = error_code(exc)
+        log.warning("imap error: %s", code)
+        surfaced.append(code)
+        return code
+
+    raised = []
+
+    def run():
+        s, c = connect(plain=GuardedPlain, tls_cls=GuardedTLS, eightbit=True)
+        c.login("user@example.com", "x")
+        for call in (lambda: c.select_folder("Missing", readonly=True), lambda: c.search(["SUBJECT", "XBAD"])):
+            try:
+                call()
+            except (IMAPClientError, imaplib.IMAP4.error) as e:
+                raised.append(e)
+                surface(e)
+
+    records = _run_logged(run, pin_critical_plus_one, prefix="")
+    cap = capfd.readouterr()
+    assert len(raised) == 2
+    assert any("Needle" in str(e) for e in raised)  # control: the exception text does carry it
+    assert surfaced == ["imap_error", "imap_error"]
+    for word in NEEDLE_CORPUS:
+        assert not any(word in m for _, _, m in records), word
+        assert word not in cap.out and word not in cap.err
+        assert not any(word in x for x in surfaced)
+    assert any(m.startswith("imap error: ") for _, _, m in records)  # control: the log path ran
+
+
+def test_error_code_is_fixed_for_every_class():
+    for exc, code in ((ReadOnlyViolation("caf\u00e9-Needle"), "read_only_violation"),
+                      (CredentialError("x"), "credential_error"),
+                      (imaplib.IMAP4.abort("caf\u00e9-Needle"), "session_aborted"),
+                      (IMAPClientAbortError("caf\u00e9-Needle"), "session_aborted"),
+                      (LoginError("caf\u00e9-Needle"), "login_failed"),
+                      (IMAPClientError("caf\u00e9-Needle"), "imap_error"),
+                      (imaplib.IMAP4.error("caf\u00e9-Needle"), "imap_error"),
+                      (OSError("caf\u00e9-Needle"), "internal_error")):
+        assert error_code(exc) == code
 ~~~
 
 ### Linux memory cap (rlimit_worker.py)
