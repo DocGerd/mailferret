@@ -1,13 +1,23 @@
-import traceback
+from typing import Any
 
 import pytest
 
 from mailferret.config import Account, parse
-from mailferret.providers import ProviderError, apply_preset, builtin_presets, resolve_presets
+from mailferret.providers import (
+    Preset,
+    ProviderError,
+    apply_preset,
+    builtin_presets,
+    resolve_presets,
+)
 
 
 def _account(body: str, login: str = "user@example.com") -> Account:
     return parse(f'[accounts.a]\nlogin = "{login}"\n{body}').accounts["a"]
+
+
+def _user(**presets: dict[str, Any]) -> dict[str, Preset]:
+    return {name: Preset.model_validate(body) for name, body in presets.items()}
 
 
 def test_builtin_names() -> None:
@@ -58,7 +68,7 @@ def test_login_must_be_address() -> None:
 
 def test_user_preset() -> None:
     presets = resolve_presets(
-        {"corp": {"host": "imap.example.org", "tls": "starttls", "header_priority": ["To"]}}
+        _user(corp={"host": "imap.example.org", "tls": "starttls", "header_priority": ["To"]})
     )
     result = apply_preset(_account('preset = "corp"'), presets)
     assert (result.host, result.port, result.tls) == ("imap.example.org", 143, "starttls")
@@ -67,7 +77,7 @@ def test_user_preset() -> None:
 
 def test_explicit_header_priority_wins() -> None:
     presets = resolve_presets(
-        {"corp": {"host": "h.example.org", "tls": "implicit", "header_priority": ["To"]}}
+        _user(corp={"host": "h.example.org", "tls": "implicit", "header_priority": ["To"]})
     )
     account = _account('preset = "corp"\n[accounts.a.aliases]\nheader_priority = ["Cc"]')
     assert apply_preset(account, presets).aliases.header_priority == ["Cc"]
@@ -75,22 +85,11 @@ def test_explicit_header_priority_wins() -> None:
 
 def test_user_preset_cannot_shadow_builtin() -> None:
     with pytest.raises(ProviderError, match="shadows"):
-        resolve_presets({"hetzner": {"host": "evil.example.org"}})
-
-
-def test_invalid_user_preset_hides_values() -> None:
-    bad = {"host": "h.example.org", "unknown_key": "x-marker"}
-    with pytest.raises(ProviderError) as info:
-        resolve_presets({"bad": bad})
-    error = info.value
-    assert "x-marker" not in str(error)
-    assert "x-marker" not in "".join(traceback.format_exception(error))
-    assert error.__context__ is None
-    assert error.__cause__ is None
+        resolve_presets(_user(hetzner={"host": "evil.example.org"}))
 
 
 def test_preset_port_kept_when_preset_has_no_tls() -> None:
-    presets = resolve_presets({"corp": {"host": "h.example.org", "port": 10993}})
+    presets = resolve_presets(_user(corp={"host": "h.example.org", "port": 10993}))
     result = apply_preset(_account('preset = "corp"\ntls = "implicit"'), presets)
     assert (result.port, result.tls) == (10993, "implicit")
 

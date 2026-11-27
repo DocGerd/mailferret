@@ -1,5 +1,5 @@
+from mailferret.config.schema import Preset
 from mailferret.providers.presets import (
-    Preset,
     ProviderError,
     apply_preset,
     builtin_presets,
