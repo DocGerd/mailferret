@@ -1,0 +1,38 @@
+[project]
+name = "mailferret"
+version = "0.1.0"
+description = "A read-only-by-default IMAP MCP server and Claude Code plugin"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = ["click>=8.5,<9"]
+
+[project.scripts]
+mailferret = "mailferret.cli:main"
+
+[dependency-groups]
+dev = ["mypy>=2.4", "pytest>=9.2", "ruff>=0.17"]
+
+[build-system]
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".claude", ".githooks", "scripts", "tests/tooling"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--ignore=tests/tooling -ra --strict-markers --strict-config"
