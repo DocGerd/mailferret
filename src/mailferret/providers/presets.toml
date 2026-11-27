@@ -1,0 +1,10 @@
+[generic]
+description = "Any IMAP server; host and tls come from the account"
+tls = "implicit"
+
+[hetzner]
+description = "Hetzner managed mail"
+host = "mail.your-server.de"
+port = 993
+tls = "implicit"
+login_is_address = true
