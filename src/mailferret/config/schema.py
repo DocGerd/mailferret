@@ -16,49 +16,15 @@ from pydantic import (
     model_validator,
 )
 
+from mailferret.limits import CEILINGS, merge, violation
+from mailferret.limits import Limits as EffectiveLimits
+
 ACCOUNT_ID_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,31}$"
 AccountId = Annotated[str, StringConstraints(pattern=ACCOUNT_ID_PATTERN)]
 
 CREDENTIAL_ENV_ALLOWLIST = frozenset({"PASSWORD_STORE_GPG_OPTS", "PASSWORD_STORE_DIR", "GNUPGHOME"})
 
 _SECRET_KEY = re.compile(r"pass(word|wd|phrase)|token|secret|api[_-]?key", re.IGNORECASE)
-
-# Ceilings of SECURITY §5, keyed by config key. Task B6 moves the table to limits.py.
-LIMIT_CEILINGS: dict[str, int] = {
-    "max_message_bytes": 25 * 1024 * 1024,
-    "max_part_bytes": 2 * 1024 * 1024,
-    "max_body_chars": 100_000,
-    "max_header_value_chars": 8_192,
-    "max_header_bytes": 256 * 1024,
-    "max_mime_depth": 16,
-    "max_mime_parts": 256,
-    "max_attachment_bytes": 10 * 1024 * 1024,
-    "max_pdf_pages": 50,
-    "pdf_worker_seconds": 20,
-    "pdf_worker_memory_bytes": 512 * 1024 * 1024,
-    "pdf_stream_bytes": 32 * 1024 * 1024,
-    "imap_connect_seconds": 15,
-    "imap_read_seconds": 30,
-    "tool_deadline_seconds": 90,
-    "credential_command_seconds": 10,
-    "max_page_size": 200,
-    "max_candidates": 10_000,
-    "max_thread_messages": 100,
-    "max_alias_period_days": 365,
-    "max_alias_scan": 5_000,
-    "max_attachments_listed": 100,
-    "max_response_bytes": 1024 * 1024,
-    "max_line_bytes": 1024 * 1024,
-    "max_folders": 1_000,
-    "credential_command_output_bytes": 4 * 1024,
-    "max_query_chars": 256,
-    "max_criteria": 16,
-    "fetch_batch_size": 200,
-    "max_command_response_bytes": 27 * 1024 * 1024,
-    "keyring_probe_seconds": 10,
-    "credential_stderr_bytes": 16 * 1024,
-    "credential_status_bytes": 16 * 1024,
-}
 
 
 class _Strict(BaseModel):
@@ -113,11 +79,15 @@ class Limits(_Strict):
 
     @model_validator(mode="after")
     def _only_lower(self) -> Self:
-        for key, ceiling in LIMIT_CEILINGS.items():
+        for key in CEILINGS:
             value = getattr(self, key)
-            if value is not None and not 1 <= value <= ceiling:
-                raise ValueError(f"{key} must be between 1 and {ceiling}")
+            problem = None if value is None else violation(key, value)
+            if problem:
+                raise ValueError(problem)
         return self
+
+    def resolve(self) -> EffectiveLimits:
+        return merge(self.model_dump())
 
 
 class Aliases(_Strict):

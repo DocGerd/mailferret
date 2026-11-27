@@ -2,7 +2,8 @@ import pytest
 from pydantic import ConfigDict, ValidationError
 
 from mailferret.config import ConfigError, parse
-from mailferret.config.schema import LIMIT_CEILINGS, _Strict
+from mailferret.config.schema import _Strict
+from mailferret.limits import CEILINGS as LIMIT_CEILINGS
 
 ACCOUNT = """
 [accounts.work]
