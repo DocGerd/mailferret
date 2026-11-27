@@ -49,10 +49,11 @@ NON_COMMITTING = {
     "cat-file", "ls-files", "ls-tree", "diff-tree", "diff-index", "diff-files", "show-ref", "for-each-ref",
     "reflog", "branch", "tag", "add", "rm", "mv", "restore", "reset", "checkout", "switch", "fetch", "clone",
     "init", "remote", "clean", "format-patch", "help", "version", "worktree", "whatchanged", "name-rev",
-    "merge-base", "push", "config", "gc", "fsck", "prune", "ls-remote", "show-branch", "range-diff", "bisect",
+    "merge-base", "push", "config", "gc", "fsck", "prune", "ls-remote", "show-branch", "range-diff",
     "apply", "archive", "bundle", "count-objects", "var", "check-ignore", "check-attr", "check-ref-format",
-    "hash-object", "verify-commit", "verify-tag", "maintenance", "sparse-checkout", "submodule", "lfs",
+    "hash-object", "verify-commit", "verify-tag", "maintenance", "sparse-checkout", "lfs",
 }
+# Deliberately absent: `bisect run` and `submodule foreach` execute arbitrary commands.
 WRAPPERS = {"timeout", "time", "nice", "nohup", "stdbuf", "command", "builtin", "env", "then", "do", "else",
             "exec", "!", "{", "if", "while", "until", "elif"}
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
@@ -102,7 +103,7 @@ def segments(text: str) -> tuple[list[list[str]], bool] | None:
         if skip:
             skip = False
         elif tok and all(c in PUNCT for c in tok):
-            if "<" in tok or ">" in tok:
+            if ("<" in tok or ">" in tok) and "(" not in tok:  # `<(`/`>(` open a process substitution
                 skip = True  # redirection target
             else:
                 subshell = subshell or "(" in tok or ")" in tok
@@ -144,6 +145,8 @@ def _commit_args(rest: list[str], target: Path, result: Commit, sub: str) -> Non
             name, eq, value = arg.partition("=")
             if name in ("--message", "--file"):
                 (message if name == "--message" else message_file)(value if eq else nxt)
+            if name in ("--trailer", "--author"):
+                message(value if eq else nxt)
             if is_commit and name in ("--all", "--include", "--only", "--interactive", "--patch"):
                 result.worktree = True
             j += 2 if name in COMMIT_OPTS_WITH_VALUE and not eq else 1
@@ -221,7 +224,7 @@ def analyse(command: str, cwd: Path) -> Commit:
         bodies.append(m.group(4) or "")
         return m.group(1)
 
-    text = HEREDOC.sub(keep_header, command)
+    text = HEREDOC.sub(keep_header, command).replace("\\\n", " ")  # line continuations
     parsed = segments(text)
     mentions_git = re.search(r"\bgit\b", command) is not None
     if parsed is None:
@@ -251,8 +254,10 @@ def analyse(command: str, cwd: Path) -> Commit:
                 seg = " ".join(tokens)
                 words = set(re.findall(r"[\w-]+", seg))
                 if (expands(head) and mentions_git) or (re.search(r"\bgit\b", seg) and words & COMMIT_LIKE):
-                    result.detected = result.ambiguous = True  # xargs/sudo git commit, $G commit
+                    # xargs/sudo/env -C git commit, $G commit: directory and message are unknown.
+                    result.detected = result.ambiguous = result.all_worktrees = True
                     result.dirs.append(cur)
+                    result.messages.append(seg)
                 continue
             _git_segment(tokens, cur, result)
         if subshell and len(visited) > 1:
@@ -260,7 +265,7 @@ def analyse(command: str, cwd: Path) -> Commit:
     if result.detected:
         result.messages.extend(bodies)
         if "\0stdin" in result.messages:
-            result.messages.remove("\0stdin")
+            result.messages = [m for m in result.messages if m != "\0stdin"]
             if not bodies:
                 result.messages.append(command)  # piped message: the command text is all we can see
     if result.ambiguous:
