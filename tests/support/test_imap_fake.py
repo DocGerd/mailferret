@@ -327,14 +327,20 @@ def test_stop_closes_a_connection_accepted_during_teardown(
 ) -> None:
     before = set(threading.enumerate())
     server = FakeImapServer(tls=tls_material, implicit_tls=True)
-    record = server._event
+    record, join = server._event, server._accept_thread.join
+    joining = threading.Event()
 
-    def hold_until_stopping(name: str) -> None:
+    def hold_until_joined(name: str) -> None:
         record(name)
         if name == "accepted:1":
-            server._stop.wait(TIMEOUT)
+            joining.wait(TIMEOUT)
 
-    monkeypatch.setattr(server, "_event", hold_until_stopping)
+    def signal_join(timeout: float | None = None) -> None:
+        joining.set()
+        join(timeout)
+
+    monkeypatch.setattr(server, "_event", hold_until_joined)
+    monkeypatch.setattr(server._accept_thread, "join", signal_join)
     server.start()
     raw = Raw(server)
     server.wait_for("accepted:1")
