@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shutil
 
-from support import EMAIL, HOME, REPO, RepoCase, run
+from .support import EMAIL, HOME, REPO, RepoCase, run
 
 
 class CommitMsg(RepoCase):

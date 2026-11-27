@@ -55,4 +55,4 @@ jobs:
           python3 -I "$scanner" --commits "$range"
       - name: Scanner and guard self-tests
         working-directory: head
-        run: python3 -I -m unittest discover -s tests/tooling
+        run: python3 -I -m unittest discover -s tests/tooling -t .

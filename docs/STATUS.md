@@ -23,4 +23,4 @@ Phase: RESTART POINT A done (Claude Code project configuration). Restart require
 - Context7 (`.mcp.json`) is for development only. The pin covers the top-level package only: its npm dependencies are unpinned and resolved by `npx` on a cold cache, with no lockfile. Approve the server per user; never set `enableAllProjectMcpServers`.
 - Native Windows needs a `cmd /c` wrapper for `npx`. Add a local-scope override with the version from `.mcp.json`: `claude mcp add-json -s local context7 '{"command":"cmd","args":["/c","npx","-y","@upstash/context7-mcp@<version>"]}'`.
 - The Read/Edit denies in `.claude/settings.json` cover the default config, data and credential locations only. A config moved with `XDG_CONFIG_HOME` or `MAILFERRET_CONFIG` is not covered.
-- Tooling self-tests: `python3 -m unittest discover -s tests/tooling`.
+- Tooling self-tests: `python3 -m unittest discover -s tests/tooling -t .` (from the repo root).

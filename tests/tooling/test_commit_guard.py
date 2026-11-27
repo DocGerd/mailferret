@@ -1,11 +1,13 @@
-""".claude/hooks/commit_guard.py: one case per review finding. Run: python3 -m unittest discover -s tests/tooling"""
+""".claude/hooks/commit_guard.py: one case per review finding. Run: python3 -m unittest discover -s tests/tooling -t ."""
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
 from pathlib import Path
 
-from support import EMAIL, ENV, GUARD, HOME, RepoCase, git, run
+from .support import EMAIL, ENV, GUARD, HOME, RepoCase, git, run
 
 ENV_LINE = "IMAP_PASS" + "WORD=" + "s3cr3t" + "Value9"
 
@@ -70,6 +72,39 @@ class Guard(RepoCase):
             with self.subTest(command=command):
                 self.assertEqual(self.guard(command), 2)
         self.assertEqual(self.guard("git status"), 0)
+
+    def test_line_continuation_and_process_substitution(self) -> None:
+        self.stage_hit(self.repo)
+        for command in ("git \\\n  commit -m x", "cat <(git commit -m x)", "diff <(git show HEAD) >(git commit -m x)"):
+            with self.subTest(command=command):
+                self.assertEqual(self.guard(command), 2)
+
+    def test_line_continuation_keeps_commit_flags(self) -> None:
+        self.write("README.md", f"{EMAIL}\n")  # unstaged: only `-a` commits it
+        self.assertEqual(self.guard("git commit \\\n  -a -m x"), 2)
+
+    def test_command_running_subcommands_are_ambiguous(self) -> None:
+        self.stage_hit(self.repo)
+        for command in ("git bisect run sh -c 'git commit -m x'", "git submodule foreach 'git commit -m x'"):
+            with self.subTest(command=command):
+                self.assertEqual(self.guard(command), 2)
+
+    def test_wrapped_commit_scans_every_worktree_and_its_text(self) -> None:
+        wt = self.worktree(self.repo / ".claude" / "worktrees" / "wt")
+        self.stage_hit(wt)
+        self.assertEqual(self.guard("echo x | xargs git commit -m x"), 2)
+        git(wt, "reset", "-q")
+        self.assertEqual(self.guard(f'sudo git commit -m "{EMAIL}"'), 2)
+        self.assertEqual(self.guard(f'git commit -m x --trailer "Reported-by: R <{EMAIL}>"'), 2)
+
+    def test_every_unknown_message_source_is_replaced_by_the_command(self) -> None:
+        spec = importlib.util.spec_from_file_location("commit_guard", GUARD)
+        assert spec and spec.loader
+        guard = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = guard  # dataclasses resolve their module
+        spec.loader.exec_module(guard)
+        command = "git commit -F $A && git commit -F -"
+        self.assertEqual(guard.analyse(command, self.repo).messages, [command])
 
     def test_unresolvable_target_fails_closed(self) -> None:
         self.assertEqual(self.guard("cd /nonexistent-mf-dir && git commit -m x"), 2)

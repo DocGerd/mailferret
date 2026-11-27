@@ -1,4 +1,4 @@
-"""scripts/pii_check.py: one case per review finding. Run: python3 -m unittest discover -s tests/tooling"""
+"""scripts/pii_check.py: one case per review finding. Run: python3 -m unittest discover -s tests/tooling -t ."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import importlib.util
 import unittest
 import zlib
 
-from support import AT, EMAIL, HOME, SCANNER, RepoCase, git
+from .support import AT, EMAIL, HOME, SCANNER, RepoCase, git
 
 spec = importlib.util.spec_from_file_location("pii_check", SCANNER)
 assert spec and spec.loader
@@ -136,6 +136,23 @@ class Diffs(RepoCase):
         self.assertRegex(res.stderr, r"commit [0-9a-f]{12}:a.txt:1: email-address")
         self.assertRegex(res.stderr, r"commit [0-9a-f]{12} message:1: home-path")
         self.assertNotIn("author-email", res.stderr)
+        self.assert_clean_output(res)
+
+    def test_commit_range_scans_merge_commits(self) -> None:
+        base = git(self.repo, "rev-parse", "HEAD").strip()
+        git(self.repo, "switch", "-q", "-c", "side")
+        self.write("side.txt", "clean\n")
+        git(self.repo, "add", "side.txt")
+        git(self.repo, "commit", "-q", "-m", "side")
+        git(self.repo, "switch", "-q", "main")
+        git(self.repo, "merge", "-q", "--no-ff", "--no-commit", "side")
+        self.write("evil.txt", f"{EMAIL}\n")  # content only the merge commit introduces
+        git(self.repo, "add", "evil.txt")
+        git(self.repo, "commit", "-q", "-m", "merge side")
+        merge = git(self.repo, "rev-parse", "HEAD").strip()
+        res = self.scan("--commits", f"{base}..HEAD")
+        self.assertIn(f"commit {merge[:12]}:evil.txt:1: email-address", res.stderr)
+        self.assertNotIn("side.txt", res.stderr)
         self.assert_clean_output(res)
 
     def test_commit_range_flags_non_noreply_author(self) -> None:
