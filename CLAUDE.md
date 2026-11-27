@@ -61,7 +61,7 @@ A generic, read-only-by-default IMAP MCP server (`mailferret serve`, stdio) and 
 
 ## PII guard
 - Commit identity: the GitHub noreply address only.
-- One-time setup per clone: `git config core.hooksPath .githooks` (pre-commit PII scan + tests, commit-msg scan).
+- One-time setup per clone: `git config core.hooksPath .githooks` (pre-commit PII scan + tests, commit-msg scan). Until it is set, commits made outside Claude Code are guarded only by CI.
 - The Claude hook in `.claude/settings.json` also blocks commits with PII or failing tests. CI runs `pii-check` on every PR.
 - Personal extra patterns go only in the untracked `.git/info/pii-patterns`. Never commit them.
 
