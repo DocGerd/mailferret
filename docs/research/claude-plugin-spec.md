@@ -22,19 +22,19 @@ Taken from the official docs at design time. Statements marked *inference* were 
 - `userConfig` (type, title, description, required, default, sensitive, …):
   - `sensitive: true` stores the value in the OS secure store. Values reach the server via `${user_config.KEY}` in MCP `env`/`args`.
   - `claude plugin install` never prompts. **Cowork never prompts**: a server referencing an option without a default is ignored.
-- Launch: `{"command":"uvx","args":["mailferret==X.Y.Z"]}`, pinned (*inference*: unpinned uvx silently serves cached old versions).
+- Launch: `{"command":"uvx","args":["mailferret==X.Y.Z"]}`, pinned (*inference*: unpinned uvx silently serves cached old versions). **Superseded** by ARCHITECTURE §9.2: this form lacks `serve`, `--from` and `--constraints`.
   - Pitfalls: uv not on PATH means a silent start failure (shown only in the `/plugin` Errors tab). First-run download can exceed the startup timeout (`MCP_TIMEOUT`). An unset `${VAR}` stays literal.
 - User/project/local MCP servers outrank plugin servers with the same name. If both `register claude-code` and the plugin are present, they duplicate each other.
 
 ## Marketplace / versioning
 - Sources: /plugins/publish.md and /plugins/marketplace-reference.md.
-- The same repo can be its own marketplace: `.claude-plugin/marketplace.json` with `name`, `owner{name}`, `plugins:[{name, source:"./"}]`.
+- The same repo can be its own marketplace: `.claude-plugin/marketplace.json` with `name`, `owner{name}`, `plugins:[{name, source:"./"}]`. **Superseded** for mailferret by ARCHITECTURE §9.1: the source is `./plugin`.
 - Reserved names include `claude-plugins-official`, `agent-skills`, `anthropic-*` and `claudeai-*`.
 - Install:
   - `claude plugin marketplace add owner/repo`, then `claude plugin install mailferret@<mkt>`
   - or `claude plugin install mailferret --marketplace owner/repo`
 - An explicit `plugin.json` `version` means users update only on a bump. Third-party auto-update is off by default. `claude plugin tag` creates `{name}--v{version}`.
-- The PyPI package (`pyproject.toml`, `src/`) and the plugin (`.claude-plugin/`, `skills/`, `.mcp.json`) live side by side in one repo. Release order: PyPI first, then bump the plugin pin and its version together.
+- The PyPI package (`pyproject.toml`, `src/`) and the plugin (`.claude-plugin/`, `skills/`, `.mcp.json`) live side by side in one repo (the root layout is **superseded** by the `plugin/` subdirectory, ARCHITECTURE §9.1). Release order: PyPI first, then bump the plugin pin and its version together.
 
 ## Skills
 - Source: code.claude.com/docs/en/skills.md.
@@ -64,4 +64,4 @@ Taken from the official docs at design time. Statements marked *inference* were 
 - `claude plugin eval` runs `evals/` cases with graders, optionally against a baseline. Mock IMAP, because no eval may touch a real mailbox.
 
 ## Open design tension
-userConfig `sensitive` (a password passed to the server via env) vs. the brief's rule that the user stores credentials with `mailferret auth set` in keyring. The design must pick one source of truth. Prefer keyring, with no secrets in env, and decide whether userConfig carries only non-secret options.
+userConfig `sensitive` (a password passed to the server via env) vs. the brief's rule that the user stores credentials with `mailferret auth set` in keyring. The design must pick one source of truth. Prefer keyring, with no secrets in env, and decide whether userConfig carries only non-secret options. **Resolved** in ARCHITECTURE §9.3: keyring (or the `command` backend) only, no userConfig.
