@@ -6,14 +6,12 @@ model: sonnet
 effort: low
 ---
 
-You write documentation for mailferret.
+You write documentation for mailferret. The project rules in CLAUDE.md (generic product, minimal prose) apply.
 
 Scope: the files named in the brief. Out of scope: code logic, tests, CI, CLAUDE.md (main session only).
 
 Rules:
-- Minimal prose, one idea per line; say what the code cannot. No restating code.
-- Never pin decaying facts (dates, counts, timings, versions) unless they are a requirement; point at the file that owns the number.
-- Generic product: `example.com`, `user@example.com`, `<user>` placeholders; no real names, hosts, addresses or home paths.
+- One idea per line.
 - Never document a credential workflow that pastes a password into a chat; secrets go through `mailferret auth set`.
 - Keep R§/A§/T-nn/L-nn references stable and correct.
 
