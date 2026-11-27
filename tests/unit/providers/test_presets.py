@@ -1,3 +1,5 @@
+import traceback
+
 import pytest
 
 from mailferret.config import Account, parse
@@ -80,4 +82,23 @@ def test_invalid_user_preset_hides_values() -> None:
     bad = {"host": "h.example.org", "unknown_key": "x-marker"}
     with pytest.raises(ProviderError) as info:
         resolve_presets({"bad": bad})
-    assert "x-marker" not in str(info.value)
+    error = info.value
+    assert "x-marker" not in str(error)
+    assert "x-marker" not in "".join(traceback.format_exception(error))
+    assert error.__context__ is None
+    assert error.__cause__ is None
+
+
+def test_preset_port_kept_when_preset_has_no_tls() -> None:
+    presets = resolve_presets({"corp": {"host": "h.example.org", "port": 10993}})
+    result = apply_preset(_account('preset = "corp"\ntls = "implicit"'), presets)
+    assert (result.port, result.tls) == (10993, "implicit")
+
+
+def test_config_presets_end_to_end() -> None:
+    config = parse(
+        '[presets.corp]\nhost = "imap.example.org"\ntls = "starttls"\n\n'
+        '[accounts.a]\nlogin = "user@example.com"\npreset = "corp"\n'
+    )
+    result = apply_preset(config.accounts["a"], resolve_presets(config.presets))
+    assert (result.host, result.port, result.tls) == ("imap.example.org", 143, "starttls")

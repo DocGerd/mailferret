@@ -1,5 +1,5 @@
 [generic]
-description = "Any IMAP server; host and tls come from the account"
+description = "Any IMAP server; the account supplies the host, tls defaults to implicit"
 tls = "implicit"
 
 [hetzner]

@@ -16,7 +16,7 @@ _DEFAULT_PORTS = {"implicit": 993, "starttls": 143}
 
 
 class ProviderError(Exception):
-    """Invalid preset or preset reference. Messages never contain config values."""
+    """Invalid preset or preset reference. Messages never contain field values."""
 
 
 class Preset(BaseModel):
@@ -37,9 +37,14 @@ def _parse(table: Mapping[str, Any], origin: str) -> dict[str, Preset]:
             presets[name] = Preset.model_validate(body)
         except ValidationError as error:
             fields = ", ".join(
-                ".".join(str(part) for part in item["loc"]) or "<root>" for item in error.errors()
+                ".".join(str(part) for part in item["loc"]) or "<root>"
+                for item in error.errors(include_input=False, include_url=False)
             )
-            raise ProviderError(f"{origin} preset {name!r} is invalid: {fields}") from None
+            message = f"{origin} preset {name!r} is invalid: {fields}"
+        else:
+            continue
+        # Raised outside the handler so __context__ holds no field values.
+        raise ProviderError(message)
     return presets
 
 
@@ -76,7 +81,8 @@ def apply_preset(account: Account, presets: Mapping[str, Preset]) -> Account:
 
     port = account.port
     if port is None:
-        port = preset.port if preset.port and tls == preset.tls else _DEFAULT_PORTS[tls]
+        use_preset_port = preset.port is not None and preset.tls in (None, tls)
+        port = preset.port if use_preset_port else _DEFAULT_PORTS[tls]
 
     update: dict[str, Any] = {"host": host, "port": port, "tls": tls}
     if preset.header_priority is not None and "header_priority" not in (
