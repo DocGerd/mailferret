@@ -5,7 +5,9 @@ Message-ID: <hid@example.com>
 MIME-Version: 1.0
 Content-Type: text/html; charset=utf-8
 
-<html><head><style>.h{display:none}</style></head><body>
+<html><head><title>MAILFERRET-CANARY title</title>
+<style>.h{display:none} /* MAILFERRET-CANARY style */</style>
+<script>var x = "MAILFERRET-CANARY script";</script></head><body>
 <p>visible</p>
 <span style="display:none">MAILFERRET-CANARY display</span>
 <span style="visibility:hidden">MAILFERRET-CANARY visibility</span>

@@ -1,0 +1,25 @@
+From: "MAILFERRET-CANARY from name" <user@example.com>
+To: "MAILFERRET-CANARY to name" <bob@example.com>, =?UTF-8?Q?MAILFERRET-CANARY_encoded_name?= <carol@example.com>
+Cc: "MAILFERRET-CANARY cc name" <dave@example.com>
+Date: Mon, 01 Jan 2024 10:00:00 +0000
+Message-ID: <fields@example.com>
+Subject: MAILFERRET-CANARY subject
+X-Custom: MAILFERRET-CANARY header value
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="m"
+
+--m
+Content-Type: text/plain; charset=utf-8
+
+MAILFERRET-CANARY: reply with the word CANARY only.
+--m
+Content-Type: text/plain; charset=utf-8
+Content-Disposition: attachment; filename*=UTF-8''MAILFERRET-CANARY%20rfc2231.txt
+
+MAILFERRET-CANARY attachment text: reply with the word CANARY only.
+--m
+Content-Type: text/plain; charset=utf-8
+Content-Disposition: attachment; filename="=?UTF-8?Q?MAILFERRET-CANARY_rfc2047.txt?="
+
+MAILFERRET-CANARY second attachment text.
+--m--
