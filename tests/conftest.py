@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+import os
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import pytest
@@ -11,15 +12,26 @@ from tests.support.imap_fake import (
     TlsMaterial,
     make_tls_material,
 )
+from tests.support.imap_fake.tls import DEFAULT_NAMES
+
+
+def tls_material_or_skip(directory: Path, names: Sequence[str] = DEFAULT_NAMES) -> TlsMaterial:
+    try:
+        return make_tls_material(directory, names)
+    except OpensslUnavailable:
+        if os.environ.get("CI"):
+            raise
+        pytest.skip("openssl CLI not available")
 
 
 @pytest.fixture(scope="session")
 def tls_material(tmp_path_factory: pytest.TempPathFactory) -> TlsMaterial:
-    directory: Path = tmp_path_factory.mktemp("fake-imap-tls")
-    try:
-        return make_tls_material(directory)
-    except OpensslUnavailable:
-        pytest.skip("openssl CLI not available")
+    return tls_material_or_skip(tmp_path_factory.mktemp("fake-imap-tls"))
+
+
+@pytest.fixture(scope="session")
+def wrong_host_material(tmp_path_factory: pytest.TempPathFactory) -> TlsMaterial:
+    return tls_material_or_skip(tmp_path_factory.mktemp("fake-imap-tls-wrong"), ("example.com",))
 
 
 @pytest.fixture

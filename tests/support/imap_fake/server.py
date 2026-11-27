@@ -39,7 +39,7 @@ class Flood:
 
 @dataclass(frozen=True)
 class Stall:
-    """Send nothing more until the server stops."""
+    """Send nothing more, but keep reading and logging client lines until EOF or stop."""
 
 
 @dataclass(frozen=True)
@@ -68,6 +68,7 @@ class Command:
     line: str
     verb: str
     sub: str | None
+    conn: int = 0
 
 
 Handler = Callable[[Command], Sequence[Part]]
@@ -75,7 +76,8 @@ _REFUSED = object()
 
 
 class _Conn:
-    def __init__(self, sock: socket.socket) -> None:
+    def __init__(self, sock: socket.socket, index: int) -> None:
+        self.index = index
         self.sock: socket.socket = sock
         self.reader: IO[bytes] = sock.makefile("rb")
         self.tls = False
@@ -104,18 +106,23 @@ class FakeImapServer:
         implicit_tls: bool = False,
         greeting: bytes = b"* OK ready\r\n",
         literals: bool = True,
+        literal_plus: bool = True,
+        advertise_starttls: bool = True,
     ) -> None:
         self.capabilities = capabilities if capabilities is not None else ["IMAP4rev1"]
-        self.advertise_starttls = True
+        self.advertise_starttls = advertise_starttls
         self.greeting = greeting
         self.literals = literals
+        self.literal_plus = literal_plus
         self.implicit_tls = implicit_tls
         self.starttls_inject = b""
         self.starttls_late = b""
         self.starttls_hold: threading.Event | None = None
-        self.wire: list[str] = []
         self.commands: list[Command] = []
         self.events: list[str] = []
+        self._wire: list[tuple[int, str]] = []
+        self._connections = 0
+        self._threads: list[threading.Thread] = []
         self._ctx = tls.server_context() if tls else None
         self._handlers: dict[str, list[tuple[Sequence[Part] | Handler, bool]]] = {}
         self._cond = threading.Condition()
@@ -123,7 +130,25 @@ class FakeImapServer:
         self._conns: list[_Conn] = []
         self._listener = socket.create_server(("127.0.0.1", 0))
         self.port: int = self._listener.getsockname()[1]
-        self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self._accept_thread = threading.Thread(
+            target=self._accept_loop, name="fake-imap-accept", daemon=True
+        )
+
+    @property
+    def wire(self) -> list[str]:
+        """Every client line, literal and continuation, across all connections."""
+        return [line for _, line in self._wire]
+
+    @property
+    def connections(self) -> int:
+        """Connections accepted so far; the nth one has index n (1-based)."""
+        return self._connections
+
+    def wire_of(self, conn: int) -> list[str]:
+        return [line for index, line in self._wire if index == conn]
+
+    def commands_of(self, conn: int) -> list[Command]:
+        return [cmd for cmd in self.commands if cmd.conn == conn]
 
     def __enter__(self) -> Self:
         self.start()
@@ -137,15 +162,28 @@ class FakeImapServer:
 
     def stop(self) -> None:
         self._stop.set()
+        with contextlib.suppress(OSError):
+            self._listener.shutdown(socket.SHUT_RDWR)
+        with contextlib.suppress(OSError):
+            socket.create_connection(("127.0.0.1", self.port), timeout=1).close()
         self._listener.close()
         with self._cond:
             conns = list(self._conns)
+            threads = [self._accept_thread, *self._threads]
         for conn in conns:
             conn.close()
+        for thread in threads:
+            if thread.is_alive():
+                thread.join(5)
 
     def on(self, key: str, reply: Sequence[Part] | Handler, *, once: bool = False) -> None:
         """Script `key` ("FETCH" or "UID FETCH"; the more specific wins); `{tag}` is substituted."""
         self._handlers.setdefault(key.upper(), []).append((reply, once))
+
+    def wait_for_wire(self, line: str, timeout: float = 10.0) -> None:
+        with self._cond:
+            if not self._cond.wait_for(lambda: line in self.wire, timeout):
+                raise TimeoutError(f"wire line {line!r} not seen; wire={self.wire}")
 
     def wait_for(self, name: str, timeout: float = 10.0) -> None:
         with self._cond:
@@ -163,10 +201,22 @@ class FakeImapServer:
                 sock, _ = self._listener.accept()
             except OSError:
                 return
-            threading.Thread(target=self._serve, args=(sock,), daemon=True).start()
+            if self._stop.is_set():
+                sock.close()
+                return
+            with self._cond:
+                self._connections += 1
+                index = self._connections
+            self._event(f"accepted:{index}")
+            thread = threading.Thread(
+                target=self._serve, args=(sock, index), name="fake-imap-conn", daemon=True
+            )
+            with self._cond:
+                self._threads.append(thread)
+            thread.start()
 
-    def _serve(self, sock: socket.socket) -> None:
-        conn = _Conn(sock)
+    def _serve(self, sock: socket.socket, index: int) -> None:
+        conn = _Conn(sock, index)
         with self._cond:
             self._conns.append(conn)
         try:
@@ -198,30 +248,33 @@ class FakeImapServer:
             if not self._dispatch(conn, cmd):
                 return
 
-    def _log(self, line: bytes) -> None:
-        self.wire.append(line.decode("latin-1"))
+    def _log(self, conn: _Conn, line: bytes) -> None:
+        with self._cond:
+            self._wire.append((conn.index, line.decode("latin-1")))
+            self._cond.notify_all()
 
     def _read_command(self, conn: _Conn) -> Command | object | None:
         first = conn.read_line()
         if first is None:
             return None
-        self._log(first)
+        self._log(conn, first)
         text, line = first, first
         while m := _LITERAL_RE.search(line):
+            if not self.literals or (m[2] and not self.literal_plus):
+                refuse_tag = first.split(b" ")[0]
+                conn.sock.sendall(refuse_tag + b" BAD literals refused\r\n")
+                return _REFUSED
             if not m[2]:
-                if not self.literals:
-                    refuse_tag = first.split(b" ")[0]
-                    conn.sock.sendall(refuse_tag + b" BAD literals refused\r\n")
-                    return _REFUSED
                 conn.sock.sendall(b"+ go\r\n")
             size = int(m[1])
-            if len(conn.reader.read(size)) != size:
+            data = conn.reader.read(size)
+            if len(data) != size:
                 return None
-            self.wire.append(f"<literal {size}>")
+            self._log(conn, b"<literal %d>" % size + data)
             tail = conn.read_line()
             if tail is None:
                 return None
-            self._log(tail)
+            self._log(conn, tail)
             line = tail
             text += b"<lit>" + tail
         decoded = text.decode("latin-1")
@@ -229,7 +282,7 @@ class FakeImapServer:
         words = rest.split(" ")
         verb = words[0].upper()
         sub = words[1].upper() if verb == "UID" and len(words) > 1 else None
-        return Command(tag, decoded, verb, sub)
+        return Command(tag, decoded, verb, sub, conn.index)
 
     def _lookup(self, cmd: Command) -> Sequence[Part] | Handler | None:
         keys = [f"{cmd.verb} {cmd.sub}"] if cmd.sub else []
@@ -297,7 +350,8 @@ class FakeImapServer:
                 if part.terminate:
                     conn.sock.sendall(b"\r\n")
             elif isinstance(part, Stall):
-                self._stop.wait()
+                while (line := conn.read_line()) is not None:
+                    self._log(conn, line)
                 return False
             elif isinstance(part, Close):
                 return False
@@ -307,7 +361,7 @@ class FakeImapServer:
                 line = conn.read_line()
                 if line is None:
                     return False
-                self._log(line)
+                self._log(conn, line)
         return True
 
     @staticmethod
