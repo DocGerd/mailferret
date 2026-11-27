@@ -118,5 +118,5 @@ class Limits(BaseModel):
 
 
 def merge(overrides: Mapping[str, int | None]) -> Limits:
-    """Apply ``[limits]`` overrides (``None`` is unset) over the ceilings; a value above its ceiling is an error."""
+    """Apply ``[limits]`` overrides (``None`` is unset); a value above its ceiling is an error."""
     return Limits.model_validate({k: v for k, v in overrides.items() if v is not None})
