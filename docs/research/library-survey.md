@@ -31,7 +31,7 @@ Sources: pypi.org/pypi/<pkg>/json, endoflife.date/api/python.json, py.sdk.modelc
 
 ## Dependency vetting (policy check)
 
-Policy: significant downloads (≥1M/month for core runtime deps), regular patch releases or a mature project with recent commits, actively maintained (not archived), no open OSV advisories, MIT-compatible license.
+Policy: significant downloads (≥1M/month for core runtime deps), regular patch releases or a mature project with recent commits, actively maintained (not archived), no open OSV advisories. Runtime dependencies must be permissive (MIT/BSD/Apache/PSF-compatible). Dev/test-only tools may be weak copyleft (MPL-2.0, LGPL) if they pass the same health checks.
 
 | Package | Verdict | Decision |
 |---|---|---|
@@ -43,7 +43,7 @@ Policy: significant downloads (≥1M/month for core runtime deps), regular patch
 | pyright | BORDERLINE (community wrapper, downloads Node at runtime) | not used; mypy --strict |
 | typer | PASS | not used; click is enough (typer adds rich + shellingham) |
 | beautifulsoup4 | not needed | — |
-| hypothesis | FAIL on license (MPL-2.0 is weak copyleft, not permissive; otherwise healthy: frequent releases, ~75M downloads/month, no OSV advisories) | **not used**; T-19 fuzzing is a seeded stdlib `random` loop |
+| hypothesis | PASS as dev-only (MPL-2.0 weak copyleft, allowed for dev/test tools; 6.170.18 released 2026-11-27, 5329 files in the last 12 months, ~75.2M downloads/month, no OSV advisories) | **adopt, dev-only**: property-based MIME/charset/alias fuzzing (T-19) |
 | secretstorage, jeepney (keyring, Linux) | PASS (BSD-3 / MIT, ~150M downloads/month, no OSV advisories; low release cadence, mature) | adopt as keyring transitives |
 | pywin32-ctypes (keyring, Windows) | BORDERLINE (BSD-3, ~8M downloads/month, no OSV advisories, last release 2024-08) | accept as a keyring transitive; re-check with keyring |
 | jaraco.classes, jaraco.functools, importlib-metadata (<3.12) (keyring) | PASS (MIT / Apache-2.0, >150M downloads/month, no OSV advisories) | adopt as keyring transitives |

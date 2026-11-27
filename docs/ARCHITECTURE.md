@@ -48,7 +48,7 @@ Resolution per account: `credential_backend = "keyring" | "command"` (default `k
 - The `command` argv lives in the config, so write access to the config means code execution as the user. That is the same-user boundary SECURITY.md places out of scope; `doctor` prints the configured argv so a change is visible.
 - No env-var backend (it would end up in client config `env`, R§8). Tests inject an in-memory backend through the same protocol.
 
-On WSL, `setup` detects that no usable keyring exists and proposes `command` with a `pass` recipe (the recommended default, pending Checkpoint 1 and spike V3; §11). `doctor` reports the backend in use, whether it is secure, and the result of a timed lookup (found / not found / locked / timeout) without printing the secret.
+On WSL, `setup` detects that no usable keyring exists and proposes `command` with a `pass` recipe (the decided default; spike V3 verifies it, §11). `doctor` reports the backend in use, whether it is secure, and the result of a timed lookup (found / not found / locked / timeout) without printing the secret.
 
 ### 2.2 Connection layer
 
@@ -62,7 +62,7 @@ On WSL, `setup` detects that no usable keyring exists and proposes `command` wit
 ### 2.3 MCP tool layer
 
 - Tools: R§3 table. Every tool takes `account` (optional only when exactly one account exists or `default_account` is set). Messages are addressed by an opaque `message_ref` = `account:folder:uidvalidity:uid` (base64url). A ref whose account or UIDVALIDITY does not match is rejected (T-14).
-- Annotations (`ToolAnnotations` field names verified, survey): `read_only_hint=True`, `open_world_hint=True` (recommended, §11: the content comes from arbitrary senders), plus `title`. Hints are not security: enforcement is §6.
+- Annotations (`ToolAnnotations` field names verified, survey): `read_only_hint=True`, `open_world_hint=True` (decided, §11: the content comes from arbitrary senders), plus `title`. Hints are not security: enforcement is §6.
 - Output: each tool builds a `CallToolResult` explicitly, with `structured_content` from its pydantic output model and `content` set to the delimited text rendering (§2.4), instead of the SDK's default JSON rendering of the model (SDK behaviour per the survey). Mail-derived strings are typed `Untrusted` fields.
 - Size (`L-19`): the bound is the sum of both channels, counted as UTF-8 bytes of the serialized `structured_content` plus the text content. On breach the body, then attachment text, is trimmed in both channels alike, with a `limit_exceeded` note naming L-19. Test: a CJK/emoji body at `L-03`.
 - Errors: raised as `ToolError` (v2, `mcp.server.mcpserver.exceptions`), which the SDK turns into an `is_error=True` result whose text the model reads; `structured_content` is empty on errors, so the typed code leads the text (`[not_configured] …`). Codes: `not_configured`, `not_found`, `limit_exceeded`, `auth_failed`, `backend_unavailable`, `timeout`, `server_error`. `MCPError` (a protocol error the model never sees) is not used for tool failures. Error texts contain no secret and no mail-derived string.
@@ -143,13 +143,13 @@ The alias and has-attachment filters cannot be fully expressed in IMAP SEARCH, s
 | | Linux | WSL2 | Windows native | macOS |
 |---|---|---|---|---|
 | Config dir | XDG config | XDG config (Linux side) | `%APPDATA%\mailferret` | `~/Library/Application Support/mailferret` |
-| Default credential backend | Secret Service via `keyring` | recommended, pending Checkpoint 1: `command` (`pass` recipe); Secret Service if `doctor` finds a working one | Windows Credential Locker | Keychain |
+| Default credential backend | Secret Service via `keyring` | decided: `command` (`pass` recipe); Secret Service if `doctor` finds a working one | Windows Credential Locker | Keychain |
 | `register claude-code` | yes | yes | yes | yes |
 | `register claude-desktop` | not targeted | writes the Windows-side config: launch via absolute `wsl.exe … --exec <abs uvx> …` (§9.6) | regular and MSIX config paths (unverified, §10 item 21) | yes |
 | Plugin | yes | yes | yes (needs `uvx` on the client PATH) | yes |
 | Plugin in Cowork | unverified (§10 item 14) | unverified | unverified | unverified |
 | CI unit tests | yes | covered by Linux, plus WSL detection unit tests with a faked `/proc` | yes | yes |
-| CI GreenMail integration | yes | — | — (Linux runners only; recommended, §11) | — (Linux runners only; recommended, §11) |
+| CI GreenMail integration | yes | — | — (Linux runners only; decided, §11) | — (Linux runners only; decided, §11) |
 
 ## 6. Read-only enforcement in the server
 
@@ -205,7 +205,7 @@ env = { PASSWORD_STORE_GPG_OPTS = "--pinentry-mode=error" }   # allowlisted name
 
 ## 8. Dependencies
 
-Choices, versions, release dates and vetting live in `docs/research/library-survey.md` (one dated snapshot, the only copy). Runtime: `mcp` (v2, `>=2.3,<3`), `imapclient`, `inscriptis` (+ `lxml`), `pypdf` (no extras), `keyring` (+ its vetted platform transitives), `platformdirs`, `click`, `pydantic`, `tomlkit`. Dev: `ruff`, `mypy`, `pytest`; GreenMail in Docker; `uv` as the launcher. No dependency outside the survey's vetted table (R§10, SECURITY §6).
+Choices, versions, release dates and vetting live in `docs/research/library-survey.md` (one dated snapshot, the only copy). Runtime: `mcp` (v2, `>=2.3,<3`), `imapclient`, `inscriptis` (+ `lxml`), `pypdf` (no extras), `keyring` (+ its vetted platform transitives), `platformdirs`, `click`, `pydantic`, `tomlkit`. Dev: `ruff`, `mypy`, `pytest`, `hypothesis` (dev-only, MPL-2.0, survey); GreenMail in Docker; `uv` as the launcher. No dependency outside the survey's vetted table (R§10, SECURITY §6).
 
 Python floor `>=3.11`. Rejected: fastmcp, aioimaplib, html2text, pymupdf, tomli-w, keyrings.alt (survey). Not added: charset detection libraries (the stdlib fallback chain is enough, R§11), justhtml (optional fallback only if inscriptis fails vetting later).
 
@@ -285,7 +285,7 @@ Primary: `mailferret register claude-desktop` (backup, then an atomic merge into
 
 ### 9.7 Plugin components
 
-The adversarial review is done and its verdicts were accepted; they are not a Checkpoint 1 item. The baseline: the MCP tool descriptions and input schemas already explain each tool, so a component must add something the server cannot. Rejected rows stay as a record.
+The adversarial review is done and its verdicts were accepted; Accepted at Checkpoint 1: the `mail-reader` agent and the `doctor` skill ship. The baseline: the MCP tool descriptions and input schemas already explain each tool, so a component must add something the server cannot. Rejected rows stay as a record.
 
 | Name | Type | Verdict | Design / decisive reason |
 |---|---|---|---|
@@ -341,17 +341,19 @@ Each item belongs to a spike in `docs/PLAN.md` phase 2a (V1–V4) and names the 
 21. The Claude Desktop config paths (regular, MSIX with the `Claude_*` glob, macOS) on real installs. Fallback: `--desktop-config <path>` becomes mandatory on that platform.
 22. `wsl.exe --exec` argument passing (no default-shell re-parsing), `-u <user>`, and a path containing a space. Fallback: a generated Linux-side launcher script at a space-free absolute path, run via `--exec`.
 
-## 11. Open decisions (Checkpoint 1)
+## 11. Decisions (Checkpoint 1)
 
-| Decision | Recommendation | Why |
+| Decision | Outcome | Why |
 |---|---|---|
-| License | MIT | Matches every runtime dependency's permissive license; simplest for reuse |
-| WSL credential backend | Recommended default (pending this checkpoint and spike V3): the `command` backend with a documented `pass` recipe (GPG-encrypted at rest, no D-Bus, works under `wsl.exe` launch). Fallback: `keyring` Secret Service when `doctor` finds a working, unlocked one (e.g. gnome-keyring or KeePassXC under WSLg) | See below |
-| Desktop distribution | `register claude-desktop` now; `.mcpb` only after item 5 of §10 is verified | Format support is documented, host support is not |
+| License | MIT (decided; `LICENSE` added) | Matches every runtime dependency's permissive license; simplest for reuse |
+| Dependency licenses | Runtime: permissive only (MIT/BSD/Apache/PSF-compatible). Dev/test-only: weak copyleft (MPL-2.0, LGPL) allowed if it passes the same health checks | Weak copyleft in a tool that is never shipped or imported at runtime does not touch the distributed code; `hypothesis` adopted dev-only (survey) |
+| Plugin components | `mail-reader` agent and `doctor` skill ship (§9.7) | Accepted as designed |
+| WSL credential backend | Decided: the `command` backend with a documented `pass` recipe (GPG-encrypted at rest, no D-Bus, works under `wsl.exe` launch). Fallback: `keyring` Secret Service when `doctor` finds a working, unlocked one (e.g. gnome-keyring or KeePassXC under WSLg) | See below |
+| Desktop distribution | Decided: `register claude-desktop` now; `.mcpb` only after item 5 of §10 is verified | Format support is documented, host support is not |
 | Plugin root | `plugin/` subdirectory | Keeps tests and fixtures out of plugin caches (§9.1) |
 | Plugin `userConfig` | None | Single source of truth (§9.3) |
 | Plugin dependency locking | `uvx --constraints` with a generated file | Exact, audited transitive set if §10 item 16 holds; `--exclude-newer` is the fallback, not a list (§9.2) |
-| LICENSE copyright holder | The GitHub handle (`<owner>`), not a legal name | Minimises personal data in the repo; the handle already identifies the publisher |
+| LICENSE copyright holder | Decided: the GitHub handle `DocGerd`, not a legal name | Minimises personal data in the repo; the handle already identifies the publisher |
 | `open_world_hint` | `True` | Content comes from arbitrary senders; clients should treat the output as external |
 | GreenMail integration scope | Linux CI only; Windows/macOS run unit tests and the fake server | Container support on hosted Windows/macOS runners is not something to depend on; the fake server covers the platform-independent protocol paths |
 
@@ -360,9 +362,9 @@ WSL options, scored against the constraints (headless stdio child, a locked stor
 | Option | Headless fit | Locked → fails fast | `auth set` works | New dep | Verdict |
 |---|---|---|---|---|---|
 | Secret Service via gnome-keyring under WSLg | needs a session bus, a running daemon and an unlocked collection; none is guaranteed under `wsl.exe` launch | the unlock prompt may hang or pop up a window | yes | none (`keyring` → `secretstorage`/`jeepney`) | fallback, when detected working |
-| `pass`/GPG via the `command` backend | gpg-agent starts on demand, no bus | expected with `--pinentry-mode=error` plus the process-tree timeout (§10 item 7) | yes, via `set` argv | none in Python; `pass` + `gnupg` are distro packages | **recommended default** |
+| `pass`/GPG via the `command` backend | gpg-agent starts on demand, no bus | expected with `--pinentry-mode=error` plus the process-tree timeout (§10 item 7) | yes, via `set` argv | none in Python; `pass` + `gnupg` are distro packages | **decided default** |
 | Windows Credential Manager via interop | breaks when interop is disabled or PATH ordering changes; `cmdkey` cannot read secrets, so it needs a PowerShell P/Invoke script | the PowerShell startup cost is paid on every call | needs a second script | none, but a fragile Windows-side script | reject as built-in; a user may wire it through `command` at their own risk |
 | Encrypted file + passphrase | the passphrase must still reach a headless process, so the problem only moves | — | yes | crypto code to own | reject |
-| Env var / command fallback | env ends up in client `env` (R§8) and `/proc/<pid>/environ` | — | no | none | env: reject; command: this is the recommended default above |
+| Env var / command fallback | env ends up in client `env` (R§8) and `/proc/<pid>/environ` | — | no | none | env: reject; command: this is the decided default above |
 
 `doctor` reports: backend type and class; `secure: yes/no`; WSL detected; for `command`, the resolved absolute path and a timed lookup result (`found`, `not_found`, `locked`, `timeout`); for `keyring` on WSL, bus reachability and collection lock state.

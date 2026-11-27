@@ -40,16 +40,16 @@ The source of truth for the design. `docs/ARCHITECTURE.md`, `docs/SECURITY.md` a
   - `mailferret setup`: interactive. Add an account from a preset or manually, and test the connection read-only.
   - `mailferret auth set <account>`
   - `mailferret accounts list`
-  - `mailferret doctor`: checks config, credentials and which backend is in use, connectivity, TLS, and that uv/the launcher is on the client PATH.
+  - `mailferret doctor`: checks config, credentials and which backend is in use, connectivity, TLS, and every visible registration's absolute launcher and constraints paths. It cannot observe the client's PATH; the plugin's `doctor` skill covers that by checking whether the mailferret tools are present in the session.
 
 ## 7. Platforms and credentials
 - Linux, WSL2, Windows native and macOS. CI runs tests on Linux, Windows and macOS.
-- Credentials go through `keyring` with the platform backend. WSL usually has no working backend, so evaluate options and propose one; it is an open decision at Checkpoint 1. Rejected so far: `keyrings.alt`. Calling Windows binaries from WSL is acceptable *only* if the design shows it is robust, and it is never required.
+- Credentials go through `keyring` with the platform backend. WSL usually has no working backend: the default there is the `command` backend with the documented `pass`/GPG recipe, and Secret Service via `keyring` is used when `doctor` finds a working, unlocked one (decided at Checkpoint 1). Rejected: `keyrings.alt`, Windows interop, an encrypted file.
 - The **user** stores the password via `auth set`. Never ask anyone to paste a password into a chat.
 
 ## 8. Client registration
 - `mailferret register claude-code` and `register claude-desktop`, plus `--print` to only show the snippet.
-- Auto-detect config paths per platform, including Claude Desktop MSIX vs. a regular install on Windows, and WSL→Windows (launch via `wsl.exe -d <distro> -- …` with absolute paths, because Windows interop can put Windows binaries ahead of WSL ones on PATH).
+- Auto-detect config paths per platform, including Claude Desktop MSIX vs. a regular install on Windows, and WSL→Windows (launch via `wsl.exe -d <distro> -u <user> --exec <absolute path> …` with absolute paths, because Windows interop can put Windows binaries ahead of WSL ones on PATH). The Desktop config paths and the `wsl.exe` argument passing are verified in a spike before they are relied on.
 - Always back up client config before writing. Never write credentials into it. Detect and warn about a duplicate registration (plugin + manual).
 - Document generic MCP client setup.
 
@@ -62,12 +62,12 @@ The source of truth for the design. `docs/ARCHITECTURE.md`, `docs/SECURITY.md` a
 
 ## 10. Engineering
 - Python with `uv`, `src/` layout, type hints, `ruff` + `mypy --strict`, `pytest`.
-- **Dependency policy:** only well-adopted, regularly patched, actively maintained libraries with a permissive license and no open advisories. Vet every new dependency (see the survey).
+- **Dependency policy:** only well-adopted, regularly patched, actively maintained libraries with no open advisories. Runtime dependencies must be permissive (MIT/BSD/Apache/PSF-compatible). Dev/test-only tools may be weak copyleft (MPL-2.0, LGPL) if they pass the same health checks. Vet every new dependency (see the survey).
 - Tests:
-  - Unit tests for MIME/charset/HTML/alias parsing with a fixture corpus: umlauts and other non-ASCII, broken charsets, nested multipart, encoded headers.
+  - Unit tests for MIME/charset/HTML/alias parsing with a fixture corpus: umlauts and other non-ASCII, broken charsets, nested multipart, encoded headers. Property-based fuzzing of MIME/charset/alias parsing with Hypothesis (dev-only).
   - Integration tests against a local IMAP server in Docker (GreenMail).
   - No test touches a real mailbox automatically.
-- Git: small commits per task, conventional commits, delivered via PRs, an open-source license (MIT proposed).
+- Git: small commits per task, conventional commits, delivered via PRs, the MIT license.
 - README: install, setup, credentials per platform, config reference, client registration, provider presets.
 
 ## 11. Lessons from a predecessor project (requirements, not code)
@@ -79,7 +79,7 @@ The source of truth for the design. `docs/ARCHITECTURE.md`, `docs/SECURITY.md` a
 - Credentials:
   - The keyring service/entry must be account-specific, because username collisions happened before.
   - Check `LOGINDISABLED` before loading the secret.
-  - Never retry a failed login, to avoid lockout.
+  - Never retry a failed login, to avoid lockout. This holds across server processes: an explicit server rejection writes a persisted auth-failed marker, and every later attempt returns `auth_failed` without connecting until `mailferret auth set`, `setup` or `mailferret auth retry` clears it.
   - Redact LOGIN lines in all logs, with a test for it.
   - Typed credential errors that never echo the secret.
 - Check `RFC822.SIZE` **before** fetching a body. Uncapped fetches caused OOM.

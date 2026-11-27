@@ -48,7 +48,7 @@ V1–V4 run in parallel with each other and with F0. A spike that contradicts th
 
 | ID | Task | Deps | Threats | Model / effort |
 |---|---|---|---|---|
-| C0 | Fixture corpus and generators (§3.1) | F0 | T-04, T-05, T-06, T-19 | sonnet / medium |
+| C0 | Fixture corpus, generators and Hypothesis strategies for MIME/charset/alias fuzzing (§3.1) | F0 | T-04, T-05, T-06, T-19 | sonnet / medium |
 | C1 | `content/charset.py`, `headers.py`, `truncate.py`: fallback chain, RFC 2047/2231, codepoint-safe truncation, incremental tail handling | C0, B6 | T-19, T-05 | **sonnet / high** |
 | C2 | `content/mime.py`: bounded BODYSTRUCTURE and MIME walk, part selection, per-part fault isolation | C1 | T-05 | **sonnet / high** |
 | C3 | `content/html.py` + `Cf` stripping: hidden-content removal, then `inscriptis`, notes | C1 | T-04, T-18 | **sonnet / high** |
@@ -106,6 +106,7 @@ Committed `.eml` files (small, synthetic, `example.com` only) plus generators fo
 - Structure: nested `multipart/mixed` > `alternative` > `related`; `message/rfc822` attachments; a missing end boundary; base64 and quoted-printable with errors.
 - Content: HTML with hidden spans of each kind, bidi and zero-width characters, injection text in every field, a closing-delimiter forgery, remote images and links.
 - Aliases: `Delivered-To`/`X-Original-To`/`To`/`Cc` combinations, plus-addresses, multiple alias domains, wildcard cases.
+- Property-based (Hypothesis, dev-only): arbitrary bytes, charset labels, encoded words and alias header combinations through the `content/` and `aliases/` pure functions; no exception, valid `str`, length within limits (T-19).
 - Generated at test time: MIME bombs (part count, depth), a huge header, PDF bombs (stream deflate bomb, page bomb, cyclic tree), a large plain PDF, a mail exceeding `L-01`.
 
 ### 3.2 Layers
