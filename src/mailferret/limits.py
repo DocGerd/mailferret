@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Final, Self
 
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -10,41 +11,43 @@ from pydantic import BaseModel, ConfigDict, model_validator
 KIB: Final = 1024
 MIB: Final = 1024 * KIB
 
-CEILINGS: Final[Mapping[str, int]] = {
-    "max_message_bytes": 25 * MIB,
-    "max_part_bytes": 2 * MIB,
-    "max_body_chars": 100_000,
-    "max_header_value_chars": 8_192,
-    "max_header_bytes": 256 * KIB,
-    "max_mime_depth": 16,
-    "max_mime_parts": 256,
-    "max_attachment_bytes": 10 * MIB,
-    "max_pdf_pages": 50,
-    "pdf_worker_seconds": 20,
-    "pdf_worker_memory_bytes": 512 * MIB,
-    "pdf_stream_bytes": 32 * MIB,
-    "imap_connect_seconds": 15,
-    "imap_read_seconds": 30,
-    "tool_deadline_seconds": 90,
-    "credential_command_seconds": 10,
-    "max_page_size": 200,
-    "max_candidates": 10_000,
-    "max_thread_messages": 100,
-    "max_alias_period_days": 365,
-    "max_alias_scan": 5_000,
-    "max_attachments_listed": 100,
-    "max_response_bytes": MIB,
-    "max_line_bytes": MIB,
-    "max_folders": 1_000,
-    "credential_command_output_bytes": 4 * KIB,
-    "max_query_chars": 256,
-    "max_criteria": 16,
-    "fetch_batch_size": 200,
-    "max_command_response_bytes": 27 * MIB,
-    "keyring_probe_seconds": 10,
-    "credential_stderr_bytes": 16 * KIB,
-    "credential_status_bytes": 16 * KIB,
-}
+CEILINGS: Final[Mapping[str, int]] = MappingProxyType(
+    {
+        "max_message_bytes": 25 * MIB,
+        "max_part_bytes": 2 * MIB,
+        "max_body_chars": 100_000,
+        "max_header_value_chars": 8_192,
+        "max_header_bytes": 256 * KIB,
+        "max_mime_depth": 16,
+        "max_mime_parts": 256,
+        "max_attachment_bytes": 10 * MIB,
+        "max_pdf_pages": 50,
+        "pdf_worker_seconds": 20,
+        "pdf_worker_memory_bytes": 512 * MIB,
+        "pdf_stream_bytes": 32 * MIB,
+        "imap_connect_seconds": 15,
+        "imap_read_seconds": 30,
+        "tool_deadline_seconds": 90,
+        "credential_command_seconds": 10,
+        "max_page_size": 200,
+        "max_candidates": 10_000,
+        "max_thread_messages": 100,
+        "max_alias_period_days": 365,
+        "max_alias_scan": 5_000,
+        "max_attachments_listed": 100,
+        "max_response_bytes": MIB,
+        "max_line_bytes": MIB,
+        "max_folders": 1_000,
+        "credential_command_output_bytes": 4 * KIB,
+        "max_query_chars": 256,
+        "max_criteria": 16,
+        "fetch_batch_size": 200,
+        "max_command_response_bytes": 27 * MIB,
+        "keyring_probe_seconds": 10,
+        "credential_stderr_bytes": 16 * KIB,
+        "credential_status_bytes": 16 * KIB,
+    }
+)
 
 DEFAULT_PAGE_SIZE: Final = 25
 DEFAULT_ALIAS_PERIOD_DAYS: Final = 30
@@ -115,5 +118,5 @@ class Limits(BaseModel):
 
 
 def merge(overrides: Mapping[str, int | None]) -> Limits:
-    """Apply ``[limits]`` overrides (``None`` is unset) over the ceilings; raising is an error."""
+    """Apply ``[limits]`` overrides (``None`` is unset) over the ceilings; a value above its ceiling is an error."""
     return Limits.model_validate({k: v for k, v in overrides.items() if v is not None})

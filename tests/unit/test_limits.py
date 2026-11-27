@@ -56,6 +56,11 @@ def test_every_l_row_has_its_ceiling_as_default(lid: str) -> None:
         assert getattr(defaults, key) == ceiling
 
 
+def test_ceilings_are_read_only() -> None:
+    with pytest.raises(TypeError):
+        CEILINGS["max_folders"] = 10**9  # type: ignore[index]
+
+
 def test_table_and_models_cover_the_same_keys() -> None:
     assert dict(CEILINGS) == EXPECTED
     assert set(Limits.model_fields) == set(CEILINGS)
