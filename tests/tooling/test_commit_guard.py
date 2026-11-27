@@ -102,12 +102,22 @@ class Guard(RepoCase):
                 self.assert_blocked_naming(command, NOT_PLAIN)
 
     def test_each_plain_rule_blocks_on_its_own(self) -> None:
-        for command in ("git commit -m x 2>&1 | tail -1", "(git commit -m x)", "git log -1 >(git commit -m x)", "git commit -m x &",
-                        "git commit -F - < msg", "GIT_INDEX_FILE=v; git commit -m x", "export GIT_DIR=v; git commit -m x",
-                        "echo $X; git commit -m x", "git --git-dir=v commit -m x", "git -c a.b=c commit -m x",
+        for command in ("git commit -m x 2>&1 | tail -1", "git commit -m x 2>&1", "git commit -m x > /dev/null",
+                        "(git commit -m x)", "git log -1 >(git commit -m x)", "cat <(git commit -m x)",
+                        "git commit -m x &", "git commit -F - < msg", "git add .;>/dev/null git commit -m x",
+                        "git commit -m x <<'EOF'\nx\nEOF", "GIT_INDEX_FILE=v; git commit -m x",
+                        "export GIT_DIR=v; git commit -m x", "echo $X; git commit -m x", "{ git commit -m x; }",
+                        "git status # note \\\ngit commit -m x", "git --git-dir=v commit -m x",
+                        "git --git-dir=/o add f && git commit -m x", "git -c a.b=c commit -m x",
                         'git -C "$D" commit -m x', "git ci -m x", "git bisect run make", "sudo git commit -m x",
-                        "timeout 60 git commit -m x", "bash -c 'git commit -m x'", 'git log "$(git commit -m y)"',
-                        "git commit -m 'unterminated"):
+                        "timeout 60 git commit -m x", "foo git commit -m x", "foo sh -c 'git commit -m x'",
+                        "bash -c 'git commit -m x'", "bash <<'EOF'\ngit commit -m x\nEOF", "sh <<< 'git commit -m x'",
+                        "python3 - <<'EOF'\nimport os; os.system('git commit -m x')\nEOF",
+                        'echo "git commit" | sh', 'c="git commit"; eval "$c"', 'git log "$(git commit -m y)"',
+                        "git log --format=`git commit -m y`", 'git commit -F "$(cat m)"',
+                        "cd /tmp || git commit -m x", "cd x; git commit -m x", "git status && cd x && git commit -m x",
+                        "cat <<'EOF'\ngit commit -m x\nEOF", "env FOO=1 make && git commit -m x",
+                        "git commit -m 'unterminated", "git log | head", "GIT_DIR=x git status"):
             with self.subTest(command=command):
                 self.assert_blocked_naming(command, NOT_PLAIN)
 
@@ -115,11 +125,10 @@ class Guard(RepoCase):
         wt = self.worktree(self.tmp / "review-wt")
         for command in ('git commit -m "GIT_DIR=x"', "git add README.md && git commit -m x", f"git -C {wt} commit -m x",
                         f"git commit -F - <<'EOF'\nfix: GIT_DIR=x\nEOF", "git --no-pager commit -m x",
-                        f"git commit -m \"$(cat <<'EOF'\nfix: x\nEOF\n)\"", 'git commit -m "$MSG"',
-                        "git commit -m x 2>&1", "git commit -m x > /dev/null", "git status\ngit commit -m x",
-                        "git commit -m x; git log -1 || true", f"cd {wt} && git commit -m x",
-                        'grep -n "git commit" README.md', 'echo "git merge done" && git commit -m x',
-                        "GIT_DIR=x git status", "export GIT_DIR=x; git log -1", "FOO=1 make"):
+                        f"git commit -m \"$(cat <<'EOF'\nfix(x): y\nEOF\n)\"", 'git commit -m "$MSG"',
+                        "git status\ngit commit -m x", "git commit -m x; git log -1 || true", f"cd {wt} && git commit -m x",
+                        'grep -n "git commit" README.md', 'echo "git merge done" && git commit -m x', "FOO=1 make",
+                        "ls | head"):
             with self.subTest(command=command):
                 self.assertEqual(self.guard(command), 0, self.stderr)
 
@@ -160,6 +169,10 @@ class Guard(RepoCase):
         for command in ("git \\\n  commit -m x", "cat <(git commit -m x)", "diff <(git show HEAD) >(git commit -m x)"):
             with self.subTest(command=command):
                 self.assertEqual(self.guard(command), 2)
+
+    def test_heredoc_message_scans_only_the_index(self) -> None:
+        self.write("README.md", f"{EMAIL}\n")  # unstaged: the delimiter must not read as a pathspec
+        self.assertEqual(self.guard("git commit -F - <<'EOF'\nfix: x\nEOF"), 0, self.stderr)
 
     def test_line_continuation_keeps_commit_flags(self) -> None:
         self.write("README.md", f"{EMAIL}\n")  # unstaged: only `-a` commits it
