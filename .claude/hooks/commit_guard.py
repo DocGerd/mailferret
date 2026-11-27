@@ -36,6 +36,8 @@ REDIRECTING_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR
                    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
                    "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CEILING_DIRECTORIES")
 REDIRECTING_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+# Make a shell that runs the commit load arbitrary code first.
+SHELL_LOADERS = ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS")
 SCRUBBED_ENV = ("GIT_PREFIX", "GIT_CONFIG")
 # Builtins that export names, and segments that may export anything.
 EXPORTERS = {"export", "declare", "typeset", "local", "readonly"}
@@ -102,7 +104,7 @@ def expands(token: str) -> bool:
 
 
 def redirecting(name: str) -> bool:
-    return name in REDIRECTING_ENV or name.startswith(REDIRECTING_PREFIXES)
+    return name in REDIRECTING_ENV or name in SHELL_LOADERS or name.startswith(REDIRECTING_PREFIXES)
 
 
 def _assigned(token: str) -> str | None:
@@ -113,6 +115,8 @@ def _assigned(token: str) -> str | None:
 def _note_exports(tokens: list[str], result: Commit) -> None:
     head = tokens[0]
     if head in EXPORTERS:
+        if head in ("declare", "typeset", "local") and any(re.fullmatch(r"-[A-Za-z]*n[A-Za-z]*", t) for t in tokens):
+            result.redirects.append(f"{head} -n")
         for tok in tokens[1:]:
             m = ASSIGNMENT.match(tok)
             name = m.group(1) if m else tok
@@ -149,13 +153,19 @@ def segments(text: str) -> tuple[list[list[str]], bool] | None:
 
 
 def _strip_wrappers(tokens: list[str], result: Commit) -> list[str]:
+    after_env = False
     while tokens and (ASSIGNMENT.match(tokens[0]) or tokens[0] in WRAPPERS):
-        name = _assigned(tokens[0])
-        if name:
+        tok = tokens.pop(0)
+        assignment = ASSIGNMENT.match(tok)
+        if name := _assigned(tok):
             result.redirects.append(name)
-        tokens.pop(0)
+        elif assignment and expands(tok):
+            result.redirects.append("an expanded assignment")
+        after_env = tok == "env" or (after_env and assignment is not None)
         while tokens and (tokens[0].startswith("-") or re.fullmatch(r"[\d.]+[smhd]?", tokens[0])):
             tokens.pop(0)
+    if tokens and expands(tokens[0]) and (after_env or "=" in tokens[0]):
+        result.redirects.append("an expanded assignment")
     return tokens
 
 
@@ -268,7 +278,7 @@ def analyse(command: str, cwd: Path) -> Commit:
             result.detected = result.ambiguous = result.all_worktrees = True
             result.dirs.append(cwd)
             result.redirects += [w for w in re.findall(r"[A-Za-z_]\w*", text) if redirecting(w)]
-            if re.search(r"\b(?:source|eval|allexport)\b|\bset\s+-[A-Za-z]*a|(?:^|[\s;&|(])\.\s", text):
+            if re.search(r"\b(?:source|eval|allexport)\b|\bset\s+-[A-Za-z]*a|(?:^|[;&|(\n])\s*\.\s", text):
                 result.redirects.append("source/eval/set -a")
     else:
         segs, subshell = parsed

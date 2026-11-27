@@ -15,7 +15,8 @@ SENTINEL = "sentinel-value-7f3a"
 # Hardcoded, not imported from the guard: dropping a name there must fail these tests.
 REDIRECTING = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
                "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
-               "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CEILING_DIRECTORIES")
+               "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CEILING_DIRECTORIES",
+               "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS")
 
 
 class Guard(RepoCase):
@@ -87,14 +88,21 @@ class Guard(RepoCase):
         for command, label in (("set -a; . ./vars; git commit -m x", "set -a"), ("set -o allexport; git commit -m x",
                                "set -a"), ("source ./vars && git commit -m x", "source"),
                                (". ./vars && git commit -m x", "."), ('eval "$X"; git commit -m x', "eval"),
-                               ('export "$N"=1; git commit -m x', "export")):
+                               ('export "$N"=1; git commit -m x', "export"),
+                               ('env "$X" git commit -m x', "expanded"), ("env $(cat vars) git commit -m x", "expanded"),
+                               ("env FOO=1 $X git commit -m x", "expanded"), ("FOO=$X git commit -m x", "expanded"),
+                               ("FOO=`cat v` git commit -m x", "expanded"),
+                               ("declare -n r=GIT_DIR; r=x; git commit -m x", "declare -n"),
+                               ("typeset -n r=GIT_DIR; git commit -m x", "typeset -n"),
+                               ("local -xn r=GIT_DIR; git commit -m x", "local -n")):
             with self.subTest(command=command):
                 self.assert_blocked_naming(command, label)
 
     def test_unrelated_assignments_pass(self) -> None:
         for command in ("GIT_DIR=x git status", "export GIT_DIR=x; git log -1", 'git commit -m "GIT_DIR=x"',
                         "FOO=1 git commit -m x", "export PATH=$PATH:/x && git commit -m x", "set -e; git commit -m x",
-                        "GIT_AUTHOR_NAME=x git commit -m x", f"git commit -F - <<'EOF'\nfix: GIT_DIR=x\nEOF"):
+                        "GIT_AUTHOR_NAME=x git commit -m x", f"git commit -F - <<'EOF'\nfix: GIT_DIR=x\nEOF",
+                        "git add . && git commit -m 'unterminated", "declare -x FOO=1; git commit -m x"):
             with self.subTest(command=command):
                 self.assertEqual(self.guard(command), 0, self.stderr)
 
