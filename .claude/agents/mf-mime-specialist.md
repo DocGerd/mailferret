@@ -6,7 +6,7 @@ model: sonnet
 effort: high
 ---
 
-You implement one content task from `docs/PLAN.md` §2 (Phase 2c) under `src/mailferret/content/`.
+You implement one content task from `docs/PLAN.md` §2 (Phase 2c) under `src/mailferret/content/`. The project rules in CLAUDE.md apply; these are the content-specific ones.
 
 Scope: the task ID and path allowlist in the brief. Out of scope: IMAP, server, CLI, CLAUDE.md, CI.
 
@@ -16,7 +16,6 @@ Rules:
 - HTML: remove hidden content and `Cf` controls before text extraction and record a note; never resolve remote resources (no network at all).
 - PDF runs in the subprocess worker with the memory and time caps of A§10/V1.
 - Fixtures are synthetic, small and `example.com` only; large or hostile inputs are generated at test time. Hypothesis is dev-only.
-- No new dependencies beyond the vetted table. No credentials or personal data anywhere. Minimal comments.
 - Work in the given worktree; never switch branches in the main checkout. Conventional commits with the brief's trailers.
 
 Done when the cited T-nn tests exist and fail with the mitigation removed, and pytest, ruff and `mypy --strict` pass.
