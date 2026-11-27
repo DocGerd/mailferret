@@ -11,8 +11,11 @@ from typing import Any
 
 REDACTED = "***"
 _SAFE_VALUE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
+# Closed set of str-valued keys: configured ids and protocol tokens, never mail data.
+_STR_KEYS = frozenset({"account", "mechanism", "limit"})
 _COMMAND_LINE = re.compile(r"\b(?:LOGIN|AUTHENTICATE)\b", re.IGNORECASE)
 _AUTH_PENDING = "[redacted: authenticate in progress]"
+_UNFORMATTABLE = "[unformattable log record]"
 _LOGGER_NAME = "mailferret"
 
 _lock = threading.Lock()
@@ -62,11 +65,18 @@ def authenticate_in_progress() -> Iterator[None]:
             _auth_depth -= 1
 
 
+def _message(record: logging.LogRecord) -> str:
+    try:
+        return record.getMessage()
+    except Exception:
+        return _UNFORMATTABLE
+
+
 class RedactionFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         with _lock:
             pending = _auth_depth > 0
-        message = _AUTH_PENDING if pending else redact(record.getMessage())
+        message = _AUTH_PENDING if pending else redact(_message(record))
         record.msg = message
         record.args = None
         # Exception text and tracebacks carry server text (T-21).
@@ -100,11 +110,19 @@ _install_record_factory()
 def event(
     logger: logging.Logger, level: int, code: str, **fields: int | float | bool | str
 ) -> None:
-    """Log a code plus ids, sizes and durations; free-form strings are refused."""
+    """Log a code plus ids, sizes and durations.
+
+    Values must be int, float or bool; str only under a key in _STR_KEYS. Everything else,
+    bytes included, is refused, as is any token the LOGIN/AUTHENTICATE rule would swallow.
+    """
     parts = [_checked(code, "code")]
     for key, value in fields.items():
         if isinstance(value, str):
+            if key not in _STR_KEYS:
+                raise ValueError(f"log field {key!r} may not hold a string")
             value = _checked(value, key)
+        elif not isinstance(value, int | float):
+            raise TypeError(f"log field {key!r} must be int, float or bool")
         parts.append(f"{_checked(key, 'key')}={value}")
     logger.log(level, " ".join(parts))
 
@@ -112,6 +130,8 @@ def event(
 def _checked(value: str, what: str) -> str:
     if not _SAFE_VALUE.fullmatch(value):
         raise ValueError(f"log {what} is not a plain identifier")
+    if _COMMAND_LINE.search(value):
+        raise ValueError(f"log {what} would be redacted as a command line")
     return value
 
 
