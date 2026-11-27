@@ -5,11 +5,16 @@
   commit_guard.py tests  block (exit 2) if `uv run pytest -q -x` fails; skipped without pyproject.toml
   commit_guard.py all    both, PII first
 
-A command that could create a commit but cannot be parsed unambiguously (shell
-expansion, an unknown subcommand or alias, `bash -c`, broken quoting) is
-treated as a commit and scanned in full. A commit is checked when its target
-shares this project's git common dir (any linked worktree, wherever it lives);
-other repositories are left alone. Any error on a possible commit blocks it.
+A command that contains a commit must be plain: git (with only -C <path> or
+--no-pager before the subcommand) and simple commands, joined by &&, ;, || or
+newlines. Assignments, shell builtins and keywords, wrappers around git,
+subshells, pipes, input redirects, unknown git subcommands and expansions
+before the subcommand block it. Expansions in the commit's own arguments, and
+a commit only named inside an argument string, make it scanned in full. This is
+best-effort: the .githooks pre-commit hook and CI enforce. A commit is checked
+when its target shares this project's git common dir (any linked worktree,
+wherever it lives); other repositories are left alone. Any error on a possible
+commit blocks it.
 """
 
 from __future__ import annotations
@@ -30,19 +35,30 @@ GIT = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
 # The hook timeout in settings.json is 600 s. All steps share this deadline so the hook never times out.
 DEADLINE = time.monotonic() + 540
 PYTEST_CAP_S = 420
-# Inherited or set in the command, these give the commit another repo, index, config or discovery than the guard
-# resolves: a commit then blocks.
+# Inherited, these give the commit another repo, index, config or discovery than the guard resolves, or make the
+# shell that runs it load code first: a commit then blocks.
 REDIRECTING_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
                    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
-                   "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CEILING_DIRECTORIES")
-REDIRECTING_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
-# Make a shell that runs the commit load arbitrary code first.
-SHELL_LOADERS = ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS")
+                   "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CEILING_DIRECTORIES",
+                   "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS")
+REDIRECTING_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_", "BASH_FUNC_")
 SCRUBBED_ENV = ("GIT_PREFIX", "GIT_CONFIG")
-# Builtins that export names, and segments that may export anything.
-EXPORTERS = {"export", "declare", "typeset", "local", "readonly"}
-LOADERS = {"source", ".", "eval"}
-ASSIGNMENT = re.compile(r"([A-Za-z_]\w*)\+?=")
+NOT_PLAIN = ("Commit blocked: run the commit as a plain `git commit` command (no env assignments, exports, "
+             "env/eval/source/., subshells, functions or expansions before git).")
+ASSIGNMENT = re.compile(r"[A-Za-z_]\w*\+?=")
+# Bash builtins and keywords (`compgen -b -k`) can change what a later git inherits; these few cannot.
+SAFE_BUILTINS = {"cd", "pushd", "popd", "echo", "printf", "true", "false", "test", "[", "pwd", ":"}
+SHELL_WORDS = {
+    ".", ":", "[", "alias", "bg", "bind", "break", "builtin", "caller", "cd", "command", "compgen", "complete",
+    "compopt", "continue", "declare", "dirs", "disown", "echo", "enable", "eval", "exec", "exit", "export", "false",
+    "fc", "fg", "getopts", "hash", "help", "history", "jobs", "kill", "let", "local", "logout", "mapfile", "popd",
+    "printf", "pushd", "pwd", "read", "readarray", "readonly", "return", "set", "shift", "shopt", "source",
+    "suspend", "test", "times", "trap", "true", "type", "typeset", "ulimit", "umask", "unalias", "unset", "wait",
+    "if", "then", "else", "elif", "fi", "case", "esac", "for", "select", "while", "until", "do", "done", "in",
+    "function", "time", "{", "}", "!", "[[", "]]", "coproc",
+}
+UNSAFE_HEADS = SHELL_WORDS - SAFE_BUILTINS | {"env"}
+GIT_NAMES = ("git", "git.exe")
 
 PUNCT = ";&|()<>\n"
 GIT_OPTS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env",
@@ -66,9 +82,6 @@ NON_COMMITTING = {
     "apply", "archive", "bundle", "count-objects", "var", "check-ignore", "check-attr", "check-ref-format",
     "hash-object", "verify-commit", "verify-tag", "maintenance", "sparse-checkout", "lfs",
 }
-# Deliberately absent: `bisect run` and `submodule foreach` execute arbitrary commands.
-WRAPPERS = {"timeout", "time", "nice", "nohup", "stdbuf", "command", "builtin", "env", "then", "do", "else",
-            "exec", "!", "{", "if", "while", "until", "elif"}
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 COULD_COMMIT = re.compile(r"\bgit\b|[$`]|\b(?:" + "|".join(map(re.escape, COMMIT_LIKE)) + r")\b")
 HEREDOC = re.compile(r"(<<-?[ \t]*(['\"]?)([A-Za-z_]\w*)\2[^\n]*)\n(?:(.*?)\n)?[ \t]*\3[ \t]*(?=\n|$)", re.S)
@@ -85,18 +98,11 @@ class Commit:
     worktree: bool = False  # -a/--all/pathspecs/--include/--only: unstaged changes get committed
     adds: bool = False  # git add/rm/mv in the same command
     all_worktrees: bool = False  # the target directory cannot be known: scan every worktree
+    plain: bool = True  # see the module docstring; a detected commit in a non-plain command blocks
     dirs: list[Path] = field(default_factory=list)
-    maybe_dirs: list[Path] = field(default_factory=list)  # earlier cd targets a subshell may have returned to
     force_paths: list[Path] = field(default_factory=list)  # `git add -f` pathspecs, absolute
     messages: list[str] = field(default_factory=list)
     message_files: list[Path] = field(default_factory=list)
-    redirects: list[str] = field(default_factory=list)  # redirecting names or loader labels set in the command
-
-    def merge(self, other: Commit) -> None:
-        for name in ("detected", "ambiguous", "worktree", "adds", "all_worktrees"):
-            setattr(self, name, getattr(self, name) or getattr(other, name))
-        for name in ("dirs", "maybe_dirs", "force_paths", "messages", "message_files", "redirects"):
-            getattr(self, name).extend(getattr(other, name))
 
 
 def expands(token: str) -> bool:
@@ -104,32 +110,21 @@ def expands(token: str) -> bool:
 
 
 def redirecting(name: str) -> bool:
-    return name in REDIRECTING_ENV or name in SHELL_LOADERS or name.startswith(REDIRECTING_PREFIXES)
+    return name in REDIRECTING_ENV or name.startswith(REDIRECTING_PREFIXES)
 
 
-def _assigned(token: str) -> str | None:
-    m = ASSIGNMENT.match(token)
-    return m.group(1) if m and redirecting(m.group(1)) else None
+def names_commit(text: str) -> bool:
+    return re.search(r"\bgit\b", text) is not None and bool(set(re.findall(r"[\w-]+", text)) & COMMIT_LIKE)
 
 
-def _note_exports(tokens: list[str], result: Commit) -> None:
-    head = tokens[0]
-    if head in EXPORTERS:
-        if head in ("declare", "typeset", "local") and any(re.fullmatch(r"-[A-Za-z]*n[A-Za-z]*", t) for t in tokens):
-            result.redirects.append(f"{head} -n")
-        for tok in tokens[1:]:
-            m = ASSIGNMENT.match(tok)
-            name = m.group(1) if m else tok
-            if expands(name) or redirecting(name):
-                result.redirects.append(head if expands(name) else name)
-    elif head in LOADERS:
-        result.redirects.append(head)
-    elif head == "set" and any(t == "allexport" or re.fullmatch(r"-[A-Za-z]*a[A-Za-z]*", t) for t in tokens[1:]):
-        result.redirects.append("set -a")
+def plain_operator(op: str) -> bool:
+    if op.replace("\n", "") in ("", "&&", ";", "||"):
+        return True
+    return op in ("<<", "<<<") or (">" in op and "<" not in op)  # a `(` always comes with a `)`
 
 
 def segments(text: str) -> tuple[list[list[str]], bool] | None:
-    """Command words split at shell operators, redirections dropped; plus whether a subshell occurs."""
+    """Command words split at shell operators, redirections dropped; plus whether every operator is plain."""
     lex = shlex.shlex(text, posix=True, punctuation_chars=PUNCT)
     lex.whitespace, lex.whitespace_split, lex.commenters = " \t\r", True, ""
     try:
@@ -137,36 +132,19 @@ def segments(text: str) -> tuple[list[list[str]], bool] | None:
     except ValueError:
         return None
     out: list[list[str]] = [[]]
-    skip = subshell = False
+    skip, plain = False, True
     for tok in tokens:
         if skip:
             skip = False
         elif tok and all(c in PUNCT for c in tok):
+            plain = plain and plain_operator(tok)
             if ("<" in tok or ">" in tok) and "(" not in tok:  # `<(`/`>(` open a process substitution
                 skip = True  # redirection target
             else:
-                subshell = subshell or "(" in tok or ")" in tok
                 out.append([])
         else:
             out[-1].append(tok)
-    return [s for s in out if s], subshell
-
-
-def _strip_wrappers(tokens: list[str], result: Commit) -> list[str]:
-    after_env = False
-    while tokens and (ASSIGNMENT.match(tokens[0]) or tokens[0] in WRAPPERS):
-        tok = tokens.pop(0)
-        assignment = ASSIGNMENT.match(tok)
-        if name := _assigned(tok):
-            result.redirects.append(name)
-        elif assignment and expands(tok):
-            result.redirects.append("an expanded assignment")
-        after_env = tok == "env" or (after_env and assignment is not None)
-        while tokens and (tokens[0].startswith("-") or re.fullmatch(r"[\d.]+[smhd]?", tokens[0])):
-            tokens.pop(0)
-    if tokens and expands(tokens[0]) and (after_env or "=" in tokens[0]):
-        result.redirects.append("an expanded assignment")
-    return tokens
+    return [s for s in out if s], plain
 
 
 def _commit_args(rest: list[str], target: Path, result: Commit, sub: str) -> None:
@@ -221,25 +199,23 @@ def _commit_args(rest: list[str], target: Path, result: Commit, sub: str) -> Non
 
 
 def _git_segment(tokens: list[str], cur: Path, result: Commit) -> None:
-    if any(expands(t) for t in tokens):
-        result.ambiguous = True
-    i, cdir = 1, Path()
+    i, cdir, plain = 1, Path(), True
     while i < len(tokens) and tokens[i].startswith("-"):
         name, eq, value = tokens[i].partition("=")
-        if name in ("--git-dir", "--work-tree"):
-            result.all_worktrees = True
         if name in GIT_OPTS_WITH_VALUE and not eq:
             value = tokens[i + 1] if i + 1 < len(tokens) else ""
             i += 1
-        if name == "-C":
-            if expands(value):
-                result.all_worktrees = True
+        if name == "-C" and not eq and not expands(value):
             cdir = cdir / os.path.expanduser(value)
+        elif name != "--no-pager":
+            plain = False
         i += 1
     sub, rest = (tokens[i], tokens[i + 1 :]) if i < len(tokens) else ("", [])
     target = cur / cdir
     if not sub:
         return
+    if any(expands(t) for t in rest):
+        result.ambiguous = True
     if sub in ("add", "rm", "mv"):
         result.adds = True
     if sub == "add":
@@ -249,17 +225,42 @@ def _git_segment(tokens: list[str], cur: Path, result: Commit) -> None:
             for spec in specs or ["."]:
                 bad = expands(spec) or spec.startswith(":") or any(t.startswith("--pathspec-from-file") for t in rest)
                 result.force_paths.append(target if bad else target / spec)
-    if sub in NON_COMMITTING and not expands(sub):
+    if sub in NON_COMMITTING:
         return
     result.detected = True
     result.dirs.append(target)
-    if sub not in COMMIT_LIKE or expands(sub):
+    if not plain or sub not in COMMIT_LIKE:  # unknown subcommands may be aliases that run a shell
+        result.plain = False
         result.ambiguous = True
         return
     if sub != "commit":
         result.worktree = True
     if sub in ("commit", "merge"):
         _commit_args(rest, target, result, sub)
+
+
+def _word_segment(tokens: list[str], cur: Path, result: Commit, mentions_git: bool) -> Path:
+    """A segment not headed by git; returns the directory later segments run in."""
+    head = tokens[0]
+    if ASSIGNMENT.match(head) or head in UNSAFE_HEADS or any(expands(t) for t in tokens):
+        result.plain = False
+    seg = " ".join(tokens)
+    if names_commit(seg) or (expands(head) and mentions_git):
+        # Directory and message are unknown. Only a commit named inside an argument (grep, gh --body) stays plain;
+        # git or a shell as its own word means a wrapper (sudo, xargs, timeout, bash -c) runs it.
+        result.detected = result.ambiguous = result.all_worktrees = True
+        result.dirs.append(cur)
+        result.messages.append(seg)
+        if any(Path(t).name in (*GIT_NAMES, *SHELLS) for t in tokens):
+            result.plain = False
+        return cur
+    if head in ("cd", "pushd", "popd"):
+        args = [t for t in tokens[1:] if not t.startswith("-")]
+        if head == "popd" or (args and args[0] == "-"):
+            result.all_worktrees = True
+            return cur
+        return cur / os.path.expanduser(args[0]) if args else Path.home()
+    return cur
 
 
 def analyse(command: str, cwd: Path) -> Commit:
@@ -276,47 +277,19 @@ def analyse(command: str, cwd: Path) -> Commit:
     if parsed is None:
         if mentions_git:
             result.detected = result.ambiguous = result.all_worktrees = True
+            result.plain = False
             result.dirs.append(cwd)
-            result.redirects += [w for w in re.findall(r"[A-Za-z_]\w*", text) if redirecting(w)]
-            if re.search(r"\b(?:source|eval|allexport)\b|\bset\s+-[A-Za-z]*a|(?:^|[;&|(\n])\s*\.\s", text):
-                result.redirects.append("source/eval/set -a")
     else:
-        segs, subshell = parsed
-        cur, visited = cwd, [cwd]
-        for raw in segs:
-            tokens = _strip_wrappers(list(raw), result)
-            if not tokens:
-                continue
-            _note_exports(tokens, result)
-            head = tokens[0]
-            if head in ("cd", "pushd", "popd"):
-                args = [t for t in tokens[1:] if not t.startswith("-")]
-                if head == "popd" or (args and (args[0] == "-" or expands(args[0]))):
-                    result.all_worktrees = True
-                else:
-                    cur = cur / os.path.expanduser(args[0]) if args else Path.home()
-                    visited.append(cur)
-                continue
-            if head in SHELLS and "-c" in tokens[1:-1]:
-                result.merge(analyse(tokens[tokens.index("-c") + 1], cur))
-                continue
-            if expands(head) or Path(head).name not in ("git", "git.exe"):
-                seg = " ".join(tokens)
-                words = set(re.findall(r"[\w-]+", seg))
-                if (expands(head) and mentions_git) or (re.search(r"\bgit\b", seg) and words & COMMIT_LIKE):
-                    # xargs/sudo/env -C git commit, $G commit: directory and message are unknown.
-                    result.detected = result.ambiguous = result.all_worktrees = True
-                    result.dirs.append(cur)
-                    result.messages.append(seg)
-                    for tok in tokens:
-                        if Path(tok).name in ("git", "git.exe"):
-                            break
-                        if name := _assigned(tok):
-                            result.redirects.append(name)
-                continue
-            _git_segment(tokens, cur, result)
-        if subshell and len(visited) > 1:
-            result.maybe_dirs.extend(visited)
+        segs, result.plain = parsed
+        cur = cwd
+        for tokens in segs:
+            if any(expands(t) and names_commit(t) for t in tokens):  # a commit inside $(...) or backticks
+                result.detected, result.plain = True, False
+                result.dirs.append(cur)
+            if Path(tokens[0]).name in GIT_NAMES:
+                _git_segment(tokens, cur, result)
+            else:
+                cur = _word_segment(tokens, cur, result, mentions_git)
     if result.detected:
         result.messages.extend(bodies)
         if "\0stdin" in result.messages:
@@ -431,9 +404,8 @@ def main(mode: str, payload: dict) -> int:
         inherited = sorted(k for k in os.environ if redirecting(k))
         if inherited:
             raise Blocked(f"Commit blocked: inherited {', '.join(inherited)} would redirect the commit; unset it.")
-        if commit.redirects:
-            raise Blocked(f"Commit blocked: {', '.join(dict.fromkeys(commit.redirects))} in the same command could "
-                          "redirect the commit; run the commit on its own.")
+        if not commit.plain:
+            raise Blocked(NOT_PLAIN)
         own = repo_of(project)
         if own is None:
             raise Blocked("Commit blocked: cannot resolve this project's git repository.")
@@ -441,10 +413,8 @@ def main(mode: str, payload: dict) -> int:
         if commit.all_worktrees:
             targets += worktrees(project)
         roots: dict[Path, None] = {}
-        for target in targets + [d for d in dict.fromkeys(commit.maybe_dirs) if d not in targets]:
+        for target in targets:
             repo = repo_of(target)
-            if repo is None and target not in targets:
-                continue
             if repo is None:
                 raise Blocked("Commit blocked: a commit target is not a resolvable git work tree "
                               f"({target}). Run the commit from inside the repository.")

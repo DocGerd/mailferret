@@ -13,10 +13,34 @@ from .support import EMAIL, ENV, GUARD, HOME, RepoCase, git, run
 ENV_LINE = "IMAP_PASS" + "WORD=" + "s3cr3t" + "Value9"
 SENTINEL = "sentinel-value-7f3a"
 # Hardcoded, not imported from the guard: dropping a name there must fail these tests.
-REDIRECTING = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
-               "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
-               "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CEILING_DIRECTORIES",
-               "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS")
+INHERITED = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+             "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+             "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CEILING_DIRECTORIES",
+             "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "BASH_FUNC_git%%")
+NOT_PLAIN = "plain `git commit`"
+# Every bypass reported on PR 9; each must block in a clean repo, so only the plain check can block it.
+BYPASSES = (
+    "GIT_INDEX_FILE=v git commit -m x", "export GIT_INDEX_FILE=v; git commit -m x", "GIT_INDEX_FILE=v; git commit -m x",
+    "GIT_INDEX_FILE=v && git commit -m x", "GIT_DIR+=v git commit -m x", "declare -x GIT_DIR=v && git commit -m x",
+    "typeset -x GIT_DIR=v; git commit -m x", "env GIT_CONFIG_PARAMETERS=v git commit -m x",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.worktree GIT_CONFIG_VALUE_0=v git commit -m x",
+    "sudo GIT_INDEX_FILE=v git commit -m x", "bash -c 'export GIT_DIR=v; git commit -m x'",
+    "export GIT_DIR; git commit -m x", "GIT_INDEX_FILE=v git commit -m 'unterminated",
+    "set -a; . ./vars; git commit -m x", "set -o allexport; git commit -m x", "source ./vars && git commit -m x",
+    ". ./vars && git commit -m x", 'eval "$X"; git commit -m x', 'export "$N"=1; git commit -m x',
+    'env "$X" git commit -m x', "env $(cat vars) git commit -m x", "env FOO=1 $X git commit -m x",
+    "FOO=$X git commit -m x", "FOO=`cat v` git commit -m x", "declare -n r=GIT_DIR; r=v; git commit -m x",
+    "typeset -n r=GIT_DIR; git commit -m x", "local -xn r=GIT_DIR; git commit -m x",
+    "env -u FOO GIT_DIR=v git commit -m x", "env -C /tmp GIT_DIR=v git commit -m x",
+    "env -S 'GIT_DIR=v git commit -m x'", "env FOO=1 \"$X\" git commit -m x",
+    "if true; then . ./vars; git commit -m x; fi", "for i in 1; do . ./vars; git commit -m x; done",
+    "{ . ./vars; git commit -m x; }", "! . ./vars; git commit -m x", "exec . ./vars; git commit -m x",
+    "command . ./vars; git commit -m x", "builtin . ./vars; git commit -m x",
+    "git() { command git commit -m x; }; git status", "BASH_ENV=./vars bash -c 'git commit -m x'",
+    "SHELLOPTS=allexport git commit -m x", "export BASH_ENV=./vars; git commit -m x",
+)
+
+
 
 
 class Guard(RepoCase):
@@ -45,7 +69,7 @@ class Guard(RepoCase):
         return path
 
     def test_clean_commit_passes(self) -> None:
-        self.assertEqual(self.guard('git commit -m "fix: thing; more" 2>&1 | tail -1'), 0)
+        self.assertEqual(self.guard('git commit -m "fix: thing; more"'), 0)
         self.assertEqual(self.guard("git status && git log --oneline -3"), 0)
 
     def test_cd_into_worktree_before_commit(self) -> None:
@@ -67,42 +91,35 @@ class Guard(RepoCase):
         self.assertEqual(self.guard(f"cd {other} && git commit -m x"), 0)
 
     def test_inherited_git_env_blocks_commits(self) -> None:
-        for name in REDIRECTING:
+        for name in INHERITED:
             with self.subTest(name=name):
                 self.assert_blocked_naming("git commit -a -m x", name, env={name: SENTINEL})
                 self.assertEqual(self.guard("git status", env={name: SENTINEL}), 0)
 
-    def test_redirect_set_in_the_command_blocks_commits(self) -> None:
-        forms = ("{n}={v} git commit -m x", "export {n}={v}; git commit -m x", "declare -x {n}={v} && git commit -m x",
-                 "typeset -x {n}={v}; git commit -m x", "env {n}={v} git commit -m x", "{n}={v}; git commit -m x",
-                 "{n}={v} && git commit -m x", "{n}+={v} git commit -m x", "sudo {n}={v} git commit -m x",
-                 "bash -c 'export {n}={v}; git commit -m x'", "export {n}; git commit -m x",
-                 "{n}={v} git commit -m 'unterminated")
-        for name in REDIRECTING:
-            for form in forms:
-                command = form.format(n=name, v=SENTINEL)
-                with self.subTest(command=command):
-                    self.assert_blocked_naming(command, name)
-
-    def test_loaders_before_a_commit_block(self) -> None:
-        for command, label in (("set -a; . ./vars; git commit -m x", "set -a"), ("set -o allexport; git commit -m x",
-                               "set -a"), ("source ./vars && git commit -m x", "source"),
-                               (". ./vars && git commit -m x", "."), ('eval "$X"; git commit -m x', "eval"),
-                               ('export "$N"=1; git commit -m x', "export"),
-                               ('env "$X" git commit -m x', "expanded"), ("env $(cat vars) git commit -m x", "expanded"),
-                               ("env FOO=1 $X git commit -m x", "expanded"), ("FOO=$X git commit -m x", "expanded"),
-                               ("FOO=`cat v` git commit -m x", "expanded"),
-                               ("declare -n r=GIT_DIR; r=x; git commit -m x", "declare -n"),
-                               ("typeset -n r=GIT_DIR; git commit -m x", "typeset -n"),
-                               ("local -xn r=GIT_DIR; git commit -m x", "local -n")):
+    def test_reported_bypasses_block(self) -> None:
+        for command in BYPASSES:
             with self.subTest(command=command):
-                self.assert_blocked_naming(command, label)
+                self.assert_blocked_naming(command, NOT_PLAIN)
 
-    def test_unrelated_assignments_pass(self) -> None:
-        for command in ("GIT_DIR=x git status", "export GIT_DIR=x; git log -1", 'git commit -m "GIT_DIR=x"',
-                        "FOO=1 git commit -m x", "export PATH=$PATH:/x && git commit -m x", "set -e; git commit -m x",
-                        "GIT_AUTHOR_NAME=x git commit -m x", f"git commit -F - <<'EOF'\nfix: GIT_DIR=x\nEOF",
-                        "git add . && git commit -m 'unterminated", "declare -x FOO=1; git commit -m x"):
+    def test_each_plain_rule_blocks_on_its_own(self) -> None:
+        for command in ("git commit -m x 2>&1 | tail -1", "(git commit -m x)", "git log -1 >(git commit -m x)", "git commit -m x &",
+                        "git commit -F - < msg", "GIT_INDEX_FILE=v; git commit -m x", "export GIT_DIR=v; git commit -m x",
+                        "echo $X; git commit -m x", "git --git-dir=v commit -m x", "git -c a.b=c commit -m x",
+                        'git -C "$D" commit -m x', "git ci -m x", "git bisect run make", "sudo git commit -m x",
+                        "timeout 60 git commit -m x", "bash -c 'git commit -m x'", 'git log "$(git commit -m y)"',
+                        "git commit -m 'unterminated"):
+            with self.subTest(command=command):
+                self.assert_blocked_naming(command, NOT_PLAIN)
+
+    def test_plain_commits_pass(self) -> None:
+        wt = self.worktree(self.tmp / "review-wt")
+        for command in ('git commit -m "GIT_DIR=x"', "git add README.md && git commit -m x", f"git -C {wt} commit -m x",
+                        f"git commit -F - <<'EOF'\nfix: GIT_DIR=x\nEOF", "git --no-pager commit -m x",
+                        f"git commit -m \"$(cat <<'EOF'\nfix: x\nEOF\n)\"", 'git commit -m "$MSG"',
+                        "git commit -m x 2>&1", "git commit -m x > /dev/null", "git status\ngit commit -m x",
+                        "git commit -m x; git log -1 || true", f"cd {wt} && git commit -m x",
+                        'grep -n "git commit" README.md', 'echo "git merge done" && git commit -m x',
+                        "GIT_DIR=x git status", "export GIT_DIR=x; git log -1", "FOO=1 make"):
             with self.subTest(command=command):
                 self.assertEqual(self.guard(command), 0, self.stderr)
 
