@@ -1,3 +1,5 @@
+import traceback
+
 import pytest
 from pydantic import ConfigDict, ValidationError
 
@@ -35,7 +37,14 @@ def test_secret_named_keys_rejected_without_echoing_value(key: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "section", ["", "[accounts.work.aliases]", "[limits]", "[accounts.work.credential_command]"]
+    "section",
+    [
+        "",
+        "[accounts.work.aliases]",
+        "[limits]",
+        "[accounts.work.credential_command]",
+        "[presets.x]",
+    ],
 )
 def test_secret_named_keys_rejected_in_every_section(section: str) -> None:
     text = ACCOUNT if section == "" else ACCOUNT + section + "\n"
@@ -57,6 +66,22 @@ def test_secret_rule_holds_where_extra_keys_are_allowed() -> None:
 def test_unknown_key_rejected() -> None:
     with pytest.raises(ConfigError):
         parse(ACCOUNT + 'colour = "red"\n')
+
+
+def test_unknown_preset_key_rejected_without_echoing_value() -> None:
+    marker = "x-marker"
+    with pytest.raises(ConfigError) as info:
+        parse(f'[presets.x]\nhost = "h.example.org"\ncolour = "{marker}"\n')
+    error = info.value
+    assert marker not in str(error)
+    assert marker not in "".join(traceback.format_exception(error))
+    assert error.__context__ is None
+    assert error.__cause__ is None
+
+
+def test_invalid_preset_name_rejected() -> None:
+    with pytest.raises(ConfigError):
+        parse('[presets.""]\nhost = "h.example.org"\n')
 
 
 def test_credential_env_outside_allowlist_rejected() -> None:

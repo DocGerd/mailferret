@@ -18,6 +18,7 @@ from pydantic import (
 
 ACCOUNT_ID_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,31}$"
 AccountId = Annotated[str, StringConstraints(pattern=ACCOUNT_ID_PATTERN)]
+PresetName = AccountId
 
 CREDENTIAL_ENV_ALLOWLIST = frozenset({"PASSWORD_STORE_GPG_OPTS", "PASSWORD_STORE_DIR", "GNUPGHOME"})
 
@@ -155,6 +156,15 @@ class Disabled(_Strict):
         return enabled
 
 
+class Preset(_Strict):
+    description: str = ""
+    host: str | None = Field(default=None, min_length=1)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    tls: Literal["implicit", "starttls"] | None = None
+    login_is_address: bool = False
+    header_priority: list[str] | None = Field(default=None, min_length=1)
+
+
 class Account(_Strict):
     preset: str | None = Field(default=None, min_length=1)
     host: str | None = Field(default=None, min_length=1)
@@ -189,7 +199,7 @@ class Config(_Strict):
     default_account: AccountId | None = None
     limits: Limits = Field(default_factory=Limits)
     accounts: dict[AccountId, Account] = Field(default_factory=dict)
-    presets: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    presets: dict[PresetName, Preset] = Field(default_factory=dict)
     smtp: Disabled = Field(default_factory=Disabled)
 
     @field_validator("schema_version")
