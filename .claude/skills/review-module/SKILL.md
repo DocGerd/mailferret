@@ -2,7 +2,6 @@
 name: review-module
 description: "Run the mailferret per-PR review gate (docs/PLAN.md §4) on a module PR: mf-reviewer and mf-security-reviewer in parallel as fresh agents, findings posted as one PR review thread each."
 argument-hint: "<module or task ID> [PR number]"
-disable-model-invocation: true
 ---
 
 Review gate for: $ARGUMENTS
