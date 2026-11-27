@@ -9,7 +9,7 @@ import ssl
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import IO, Self
+from typing import Self
 
 from tests.support.imap_fake.tls import TlsMaterial
 
@@ -76,20 +76,38 @@ _REFUSED = object()
 
 
 class _Conn:
+    """Socket plus read buffer; no `makefile`, so `close()` wakes a blocked read on Windows."""
+
     def __init__(self, sock: socket.socket, index: int) -> None:
         self.index = index
         self.sock: socket.socket = sock
-        self.reader: IO[bytes] = sock.makefile("rb")
+        self.buf = b""
         self.tls = False
 
     def upgrade(self, ctx: ssl.SSLContext) -> None:
         self.sock = ctx.wrap_socket(self.sock, server_side=True)
-        self.reader = self.sock.makefile("rb")
+        self.buf = b""
         self.tls = True
 
+    def _fill(self) -> bool:
+        chunk = self.sock.recv(_CHUNK)
+        self.buf += chunk
+        return bool(chunk)
+
     def read_line(self) -> bytes | None:
-        line = self.reader.readline()
-        return line.rstrip(b"\r\n") if line else None
+        while b"\n" not in self.buf:
+            if not self._fill():
+                break
+        if not self.buf:
+            return None
+        line, sep, self.buf = self.buf.partition(b"\n")
+        return line.rstrip(b"\r") if sep else line
+
+    def read(self, size: int) -> bytes:
+        while len(self.buf) < size and self._fill():
+            pass
+        data, self.buf = self.buf[:size], self.buf[size:]
+        return data
 
     def close(self) -> None:
         with contextlib.suppress(OSError):
@@ -267,7 +285,7 @@ class FakeImapServer:
             if not m[2]:
                 conn.sock.sendall(b"+ go\r\n")
             size = int(m[1])
-            data = conn.reader.read(size)
+            data = conn.read(size)
             if len(data) != size:
                 return None
             self._log(conn, b"<literal %d>" % size + data)
