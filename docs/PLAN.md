@@ -9,7 +9,7 @@ Implements `docs/ARCHITECTURE.md` (cited as A§n) and `docs/SECURITY.md` (`T-nn`
 | Discovery | haiku / low |
 | Research (verification spikes) | sonnet / medium |
 | Architecture / security | opus / high |
-| Module implementation + tests | sonnet / medium; **sonnet / high for MIME/charset** (C-tasks) |
+| Module implementation + tests | sonnet / medium; **sonnet / high for MIME/charset** (C1–C4) |
 | Independent review (gate, §4) | opus / high, a fresh agent per PR |
 | Docs | haiku or sonnet / low |
 | Claude Code setup (plugin) | opus / medium |
@@ -28,7 +28,7 @@ Where a non-MIME task is security-heavy (guard, credentials, TLS), the extra scr
 | V1 | Spike: the imapclient/imaplib hook point for the command guard and read-side caps; ESEARCH exposure (A§10 items 1, 2, 10 for pypdf knobs). Output: a short note in `docs/research/` and a throwaway prototype test | — | T-08, T-10 | sonnet / medium |
 | V2 | Spike: GreenMail capabilities, auth-enabled users via `GREENMAIL_OPTS`, the TLS keystore/CA for `ca_file` tests, and whether APPEND preserves plus-address recipients (A§10 item 3) | — | T-07 | sonnet / medium |
 | V3 | Spike: headless credential behaviour on WSL (`pass` with expired agent cache and closed stdin; Secret Service bus discovery) (A§10 item 7) | — | T-17 | sonnet / medium |
-| V4 | Spike: SDK text content beside structured output; plugin detection and same-name shadowing; Desktop `.mcpb` `type: uv`; subdirectory plugin root on claude.ai/Cowork (A§10 items 4, 5, 6, 9) | — | T-04 | sonnet / medium |
+| V4 | Spike: SDK text content beside structured output; plugin detection and same-name shadowing; Desktop `.mcpb` `type: uv`; subdirectory plugin root on claude.ai/Cowork; Bash/MCP PATH inheritance; agent `tools` wildcards; `claude mcp add-json` (A§10 items 4–6, 9, 11–13) | — | T-04 | sonnet / medium |
 
 V1–V4 run in parallel with each other and with F0. A spike that contradicts the design returns to an opus / high architecture update before dependent tasks start.
 
@@ -41,7 +41,7 @@ V1–V4 run in parallel with each other and with F0. A spike that contradicts th
 | B3 | `logging.py`: stderr-only, redaction set, LOGIN/AUTHENTICATE line redaction | F0 | T-03 | sonnet / medium |
 | B4 | `credentials/` protocol, `Secret`, typed errors, `keyring` backend, backend detection (fail/null/plaintext, WSL) | F0, B3 | T-01, T-02, T-03 | sonnet / medium |
 | B5 | `credentials/` `command` backend | B4, V3 | T-17 | sonnet / medium |
-| B6 | `server/limits.py`: the L-table as one frozen model, config merge | B1 | all `L-nn` | sonnet / medium |
+| B6 | `limits.py` (top level, imported by every layer): the L-table as one frozen model, config merge | B1 | all `L-nn` | sonnet / medium |
 
 ### Phase 2c: content (pure, fixture-driven)
 
@@ -52,7 +52,7 @@ V1–V4 run in parallel with each other and with F0. A spike that contradicts th
 | C2 | `content/mime.py`: bounded BODYSTRUCTURE and MIME walk, part selection, per-part fault isolation | C1 | T-05 | **sonnet / high** |
 | C3 | `content/html.py` + `Cf` stripping: hidden-content removal, then `inscriptis`, notes | C1 | T-04, T-18 | **sonnet / high** |
 | C4 | `content/pdf_worker.py` + extractor registry (PDF, text, HTML) with subprocess limits | C2, V1 | T-06 | **sonnet / high** |
-| C5 | `aliases/` resolver: header priority, plus separator, domains, exact and wildcard match, aggregation | C1 | T-09 | **sonnet / high** |
+| C5 | `aliases/` resolver: header priority, plus separator, domains, exact and wildcard match, aggregation | C1 | T-09 | sonnet / medium |
 
 ### Phase 2d: IMAP and query
 
@@ -82,18 +82,17 @@ V1–V4 run in parallel with each other and with F0. A spike that contradicts th
 | ID | Task | Deps | Threats | Model / effort |
 |---|---|---|---|---|
 | F1 | `registration/` core: discovery, backup, atomic write, duplicate detection | B1, V4 | T-12 | sonnet / medium |
-| F2 | `register claude-code` + `register claude-desktop` (regular, MSIX, WSL→Windows), `--print`, `--force` policy (A§9.5) | F1, E3 | T-12 | sonnet / medium |
+| F2 | `register claude-code` (via `claude mcp add-json`) + `register claude-desktop` (regular, MSIX, WSL→Windows), `--print`, `--force` policy (A§9.5) | F1, E3 | T-12 | sonnet / medium |
 | P1 | Plugin skeleton: `plugin/` manifests, `.mcp.json` pin, marketplace, `claude plugin validate --strict` in CI, version-coupling check | E2 | T-13 | opus / medium |
-| P2 | Adversarial review of the component table (A§9.7), by a fresh agent | P1 | T-15 | opus / high |
-| P3 | Plugin components that survived P2 | P2 | T-04, T-15 | opus / medium |
-| P4 | Plugin evals with mocked IMAP (`claude plugin eval`), if the CLI supports a local MCP fixture | P3, D0 | T-04 | opus / medium |
+| P2 | Plugin components that survived the Checkpoint 1 adversarial review of A§9.7 | P1, E5 | T-04, T-15 | opus / medium |
+| P3 | Plugin evals with mocked IMAP (`claude plugin eval`), if the CLI supports a local MCP fixture | P2, D0 | T-04 | opus / medium |
 
 ### Phase 2g: docs and release
 
 | ID | Task | Deps | Threats | Model / effort |
 |---|---|---|---|---|
-| G1 | README: install, setup, credentials per platform (incl. the WSL recipe), config reference, registration, generic MCP client setup, presets, the T-18 residual risk | E5, F2, P3 | — | sonnet / low |
-| G2 | Release workflow: tag → trusted publishing → uvx smoke → plugin pin bump PR (A§9.4) | P1 | T-13 | sonnet / medium |
+| G1 | README: install, setup, credentials per platform (incl. the WSL recipe), config reference, registration, generic MCP client setup, presets, the T-18 residual risk | E5, F2, P2 | — | sonnet / low |
+| G2 | Release workflow: tag → trusted publishing → uvx smoke → plugin pin bump PR (A§9.4); the first release claims the PyPI name and is followed by the PR that adds the marketplace entry | P1 | T-13 | sonnet / medium |
 
 ## 3. Test strategy
 
@@ -115,7 +114,7 @@ Committed `.eml` files (small, synthetic, `example.com` only) plus generators fo
 | Unit (pure modules) | Linux, Windows, macOS | `content/`, `aliases/`, `config/`, `credentials/` (in-memory and fake-command backends), `registration/` (temp dirs, fake platform roots) |
 | Fake IMAP server (D0) | Linux, Windows, macOS | Guard wire tests, capability branches GreenMail lacks, TLS/STARTTLS failure modes, hostile responses (T-07, T-08, T-09, T-10) |
 | GreenMail integration | Linux CI and local Docker | All tools end to end, `\Seen` and flags unchanged, two accounts, login failure without retry, `ca_file` |
-| Plugin | Linux CI | `claude plugin validate --strict`, version-coupling check, evals with mocked IMAP (P4) |
+| Plugin | Linux CI | `claude plugin validate --strict`, version-coupling check, evals with mocked IMAP (P3) |
 
 No test touches a real mailbox. Integration tests are marked and skipped when Docker is unavailable, with a visible skip reason.
 
@@ -144,9 +143,10 @@ No test touches a real mailbox. Integration tests are marked and skipped when Do
 | 7 | D5 → D6 → D7 (a chain) |
 | 8 | E2 |
 | 9 | E3, P1 |
-| 10 | E4, F2, P2 |
-| 11 | E5, P3, G2 |
-| 12 | P4, G1 |
+| 10 | E4, F2 |
+| 11 | E5 → Checkpoint 2 |
+| 12 | P2, G2 |
+| 13 | P3, G1 |
 
 Each parallel task runs in its own git worktree and touches only its module, its tests and its fixtures.
 
@@ -160,4 +160,4 @@ Reached when all of:
 - Every `T-nn` in SECURITY §4 has its verification test, and every `L-nn` has a test that crosses it.
 - `claude plugin validate --strict` passes on P1.
 
-Plugin components (P2–P4), the README (G1) and the release (G2) follow Checkpoint 2.
+Plugin components (P2, P3), the README (G1) and the release (G2) follow Checkpoint 2. The adversarial review of the component table happens before Checkpoint 1, so P2 starts from a decided list.
