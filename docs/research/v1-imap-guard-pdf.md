@@ -74,13 +74,13 @@ Wire survey (3.14): `CAPABILITY, LOGIN, CAPABILITY, CAPABILITY, NAMESPACE, LIST,
 
 ## Follow-up design edits (issue #7)
 
-Not edited here. This table is the single list issue #7 points to: apply every row. Each blocks its owner.
+Not edited here. This table is the single list issue #7 points to: apply every row. Each blocks its owner. Where a row conflicts with SECURITY §3 R1 or §5, SECURITY wins (marked superseded).
 
 | Edit | Owner |
 |---|---|
 | A§10.1, A§6, T-10: hook is `_new_tag` + `send` with the fail-closed gate; allowlist FETCH items; D2 resets the gate on abort and reconnect | SECURITY follow-up (text), D2 (code) |
 | T-10, R2: armed line ends in CRLF (SEARCH/SORT/THREAD may be unterminated); literal announcements refused except in SEARCH/SORT/THREAD; `_new_tag` refuses to re-arm mid-command; tests for the `UID FETCH 1 (FLAGS` + ` BODY[])` and literal-in-FETCH probes, spaced and unspaced (`({n}`), sync and `{n+}`, and for `_new_tag` mid-command | D2 |
-| T-10, R1: sync literal bytes only after this tag's `+` (`{n+}` at once); AUTHENTICATE replies match with `fullmatch`; the gate closes on tagged completion; `{n+}` bytes only if LITERAL+ was advertised; tests for bytes before `+`, after a tagged BAD, and after AUTHENTICATE | D2 |
+| T-10, R1: sync literal bytes only after this tag's `+` (`{n+}` at once); AUTHENTICATE replies match with `fullmatch`; the gate closes on tagged completion; `{n+}` bytes only if LITERAL+ was advertised; tests for bytes before `+`, after a tagged BAD, and after AUTHENTICATE. Superseded for `{n+}`: refused whether or not LITERAL+ is advertised (SECURITY §3 R1) | D2 |
 | T-10 tests: the line-break check is exercised on every minor by a stub-based test; the wire-level CRLF test counts on 3.11/3.12 only, so the CI matrix keeps both | D2 |
 | A§2.2, T-07: reword buffered-bytes sentence; probe by feature (`_readbuf`, then `file.peek`, then `MSG_PEEK`); STARTTLS injection test on every supported minor in CI | SECURITY follow-up, D1 |
 | T-08, A§4, A§3 step 6: per-command literal cap from the fetched item's L-nn (L-05/L-02/L-08/L-01), reset in `_new_tag` | SECURITY follow-up, D2 |
@@ -93,6 +93,8 @@ Not edited here. This table is the single list issue #7 points to: apply every r
 | T-06, A§10.10: Windows job object and macOS `RLIMIT_AS`, researched and run on windows and macos CI runners; add a STATUS open item | C4 |
 
 ## Appendix: throwaway prototype (not for `tests/`)
+
+Superseded where it conflicts with SECURITY: the `GuardMixin` accepts `{n+}` (refused, SECURITY §3 R1) and raises breaches as `self.abort` (a typed error, never reconnected, SECURITY §5 and A§2.2).
 
 Run, per Python, from outside the repository (needs `openssl` for a throwaway certificate; fakes listen on 127.0.0.1 only):
 `UV_PYTHON=<ver> uv run --no-project --with imapclient==4.3.0 --with pytest==9.2.0 python -I -m pytest -q -s test_v1_hook.py`.
