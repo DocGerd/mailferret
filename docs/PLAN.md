@@ -7,10 +7,10 @@ Implements `docs/ARCHITECTURE.md` (cited as A§n) and `docs/SECURITY.md` (`T-nn`
 | Work | Model / effort |
 |---|---|
 | Discovery | haiku / low |
-| Research (verification spikes) | sonnet / medium |
+| Research (verification spikes) | sonnet / medium: `mf-researcher` writes the note, `mf-implementer` runs the executable parts |
 | Architecture / security | opus / high |
 | Module implementation + tests | sonnet / medium; **sonnet / high for MIME/charset** (C1–C4) |
-| Independent review (gate, §4) | opus / high, a fresh agent per PR |
+| Independent review (gate, §4) | opus / high, two fresh agents per PR (`mf-reviewer`, `mf-security-reviewer`) |
 | Docs | haiku or sonnet / low |
 | Claude Code setup (plugin) | opus / medium |
 
@@ -30,7 +30,7 @@ Where a non-MIME task is security-heavy (guard, credentials, TLS), the extra scr
 | V3 | Spike: headless credential behaviour on WSL (`pass` with an expired agent cache under `--pinentry-mode=error`; a grandchild holding stdout; Secret Service bus discovery) (A§10 item 7) | — | T-17 | sonnet / medium |
 | V4 | Spike: SDK text content beside structured output; plugin detection and same-name shadowing; Desktop `.mcpb` `type: uv`; subdirectory plugin root on claude.ai/Cowork; Bash/MCP PATH inheritance; `command -v` on Windows; `claude mcp add-json`; Cowork host vs VM; `${VAR:-default}` and env inheritance; `uvx --constraints`; `${CLAUDE_PLUGIN_ROOT}` in `allowed-tools`; agent allowlist excluding Skill/Agent; `CLAUDECODE=1`; out-of-plugin evals and `claude plugin disable`; Desktop config paths; `wsl.exe --exec` argument passing (A§10 items 4–6, 9, 11–22) | — | T-04 | sonnet / medium |
 
-V1–V4 run in parallel with each other and with F0. A spike that contradicts the design returns to an opus / high architecture update before dependent tasks start.
+V1–V4 run in parallel with each other and with F0. Each pairs `mf-researcher` (docs and source questions, the note) with `mf-implementer` (prototype tests, GreenMail in Docker, `pass`/gpg on WSL, `claude` CLI checks). A spike that contradicts the design returns to an opus / high architecture update before dependent tasks start.
 
 ### Phase 2b: foundation
 
@@ -63,7 +63,7 @@ V1–V4 run in parallel with each other and with F0. A spike that contradicts th
 | D1 | `imap/` connect: TLS modes, STARTTLS rules, timeouts, capability parsing | B6, D0, V1 | T-07 | sonnet / medium |
 | D2 | `imap/` guard + `ReadOnlySession` + read-side caps + deadline cancellation by socket shutdown (`L-13`) | D1 | T-08, T-10 | sonnet / medium |
 | D3 | `auth/` protocol + `PasswordAuth`: mechanism choice from post-TLS capabilities, persistent auth-failed marker | B4, D2, D4 | T-03, T-16 | sonnet / medium |
-| D4 | GreenMail harness: compose file, auth-enabled users, CA, APPEND-based seeding from C0, two-account setup | V2, C0 | T-14 | sonnet / medium |
+| D4 | GreenMail harness: compose file `tests/integration/docker-compose.yml`, auth-enabled users, CA, APPEND-based seeding from C0, two-account setup | V2, C0 | T-14 | sonnet / medium |
 | D5 | `query/` folders + search: criteria list builder, SORT branch, paging cursor, caps, has-attachment and alias post-filters (A§2.6, `L-23`–`L-25`) | D3, C5, D4 | T-09, T-14 | sonnet / medium |
 | D6 | `query/` fetch + `get_message` assembly (A§3) | D5, C2, C3, D4 | T-05, T-08 | sonnet / medium |
 | D7 | `query/` thread (THREAD=REFERENCES branch and header fallback) and attachments | D6, C4 | T-05 | sonnet / medium |
@@ -128,9 +128,9 @@ No test touches a real mailbox. Integration tests are marked and skipped when Do
 ## 4. Review gate (per PR)
 
 1. CI green on every matrix job the task touches.
-2. A fresh opus / high reviewer (it gets the diff, the cited `T-nn`/`L-nn` and SECURITY §6, not the implementer's reasoning) returns findings. Each finding is fixed or explicitly answered.
-3. For every cited threat, the reviewer checks that its test fails when the mitigation is removed (mutation spot check).
-4. Merge only with no open findings.
+2. Two fresh opus / high agents review in parallel (`/review-module`): `mf-reviewer` (correctness, tests, design fit) and `mf-security-reviewer` (SECURITY threats, limits, §6). Each gets the diff, the cited `T-nn`/`L-nn` and SECURITY §6, not the implementer's reasoning, and posts one review thread per finding. Each finding is fixed or explicitly answered.
+3. For every cited threat, the reviewers check that its test fails when the mitigation is removed (mutation spot check).
+4. Merge only with no open findings and both verdicts approve on the latest commit.
 
 ## 5. Parallelism (worktrees)
 
