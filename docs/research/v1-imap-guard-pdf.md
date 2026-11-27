@@ -64,7 +64,7 @@ Wire survey (3.14): `CAPABILITY, LOGIN, CAPABILITY, CAPABILITY, NAMESPACE, LIST,
 - A§10.1, A§6, T-10: the hook is `_new_tag` plus every `send`, not `_command`. The T-10 recording-fake-server proof compares the wire with the allowlist, not the guard's log.
 - A§2.2, T-07: "`starttls()` drops such bytes silently" holds on 3.11-3.13 only. Suggested: "`starttls()` neither detects nor reliably discards them; a guarded `_command_complete` checks the read buffer."
 - T-08: "raises before it is buffered" is wrong for lines. Suggested: "lines are bounded at L-20 plus a bounded overshoot (asserted at 256 KiB on 3.14) on read." The cap is process-global (`imaplib._MAXLINE`); L-20 exceeds the stdlib default.
-- T-08, A§4, A§6 step 6: one fixed L-02 literal cap breaks the L-08 and L-01 fetches; the cap is per command (decision 1).
+- T-08, A§4, A§3 step 6: one fixed L-02 literal cap breaks the L-08 and L-01 fetches; the cap is per command (decision 1).
 - T-08, L-nn: the per-command response total has no row in SECURITY §5; a batch of L-25 UIDs times L-02 is far above L-19. Needs a new L-nn with a `[limits]` key.
 - L-15, L-20: without ESEARCH, `UID SEARCH` returns every match on one line (about 8 bytes per UID); above roughly 130k matches it exceeds L-20 and the session aborts.
 - T-03, T-21: "imaplib's debug output is never enabled" is not enough. imapclient sets `debug = 5` after construction (a constructor-time override cannot zero it), and its loggers carry server lines, search criteria and the username. `imapclient.util` also warns with raw 8-bit server bytes, so a WARNING pin leaks to stderr. Needs both controls of decision 1. Exception messages also carry server text (row 21): D2 maps them to fixed codes and never logs them.
@@ -83,7 +83,7 @@ Not edited here. This table is the single list issue #7 points to: apply every r
 | T-10, R1: sync literal bytes only after this tag's `+` (`{n+}` at once); AUTHENTICATE replies match with `fullmatch`; the gate closes on tagged completion; `{n+}` bytes only if LITERAL+ was advertised; tests for bytes before `+`, after a tagged BAD, and after AUTHENTICATE | D2 |
 | T-10 tests: the line-break check is exercised on every minor by a stub-based test; the wire-level CRLF test counts on 3.11/3.12 only, so the CI matrix keeps both | D2 |
 | A§2.2, T-07: reword buffered-bytes sentence; probe by feature (`_readbuf`, then `file.peek`, then `MSG_PEEK`); STARTTLS injection test on every supported minor in CI | SECURITY follow-up, D1 |
-| T-08, A§4, A§6 step 6: per-command literal cap from the fetched item's L-nn (L-05/L-02/L-08/L-01), reset in `_new_tag` | SECURITY follow-up, D2 |
+| T-08, A§4, A§3 step 6: per-command literal cap from the fetched item's L-nn (L-05/L-02/L-08/L-01), reset in `_new_tag` | SECURITY follow-up, D2 |
 | T-08: wording "bounded at L-20 plus a bounded overshoot"; `imaplib._MAXLINE` set once, process-global | SECURITY follow-up, D2 |
 | New L-nn: per-command response total, with a `[limits]` key and ceiling | SECURITY follow-up (before D2) |
 | L-15, L-20: windowed UID ranges for SEARCH or `limit_exceeded`; L-20 never raised | SECURITY follow-up, D2 |
