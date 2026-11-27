@@ -1,13 +1,2 @@
-#!/usr/bin/env python3
-"""Git commit-msg: PII scan of the commit message (generic and local patterns)."""
-
-import subprocess
-import sys
-from pathlib import Path
-
-root = Path(subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True).stdout.strip())
-scanner = root / "scripts" / "pii_check.py"
-if len(sys.argv) < 2 or not scanner.is_file():
-    sys.exit("commit-msg: message file or scripts/pii_check.py missing")
-if subprocess.run([sys.executable, str(scanner), sys.argv[1]], cwd=root, stdin=subprocess.DEVNULL).returncode != 0:
-    sys.exit("commit-msg: blocked by the PII scan (see above)")
+#!/bin/sh
+. "$(dirname "$0")/_python.sh"
