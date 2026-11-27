@@ -6,6 +6,8 @@ import shutil
 import socket
 import ssl
 import threading
+import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -311,11 +313,20 @@ def test_stop_leaves_no_threads_behind() -> None:
     raw.close()
 
 
+def _stop_promptly_without_leaks(server: FakeImapServer, before: set[threading.Thread]) -> None:
+    started = time.monotonic()
+    server.stop()
+    elapsed = time.monotonic() - started
+    leaked = [t for t in threading.enumerate() if t not in before and t.is_alive()]
+    assert leaked == []
+    assert elapsed < 1.0
+
+
 def test_stop_closes_a_connection_accepted_during_teardown(
-    monkeypatch: pytest.MonkeyPatch,
+    tls_material: TlsMaterial, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     before = set(threading.enumerate())
-    server = FakeImapServer()
+    server = FakeImapServer(tls=tls_material, implicit_tls=True)
     record = server._event
 
     def hold_until_stopping(name: str) -> None:
@@ -327,11 +338,50 @@ def test_stop_closes_a_connection_accepted_during_teardown(
     server.start()
     raw = Raw(server)
     server.wait_for("accepted:1")
-    server.stop()
-    leaked = [t for t in threading.enumerate() if t not in before and t.is_alive()]
-    assert leaked == []
-    while raw.sock.recv(65536):
-        pass
+    _stop_promptly_without_leaks(server, before)
+    raw.close()
+
+
+@pytest.fixture
+def handshake_traced(monkeypatch: pytest.MonkeyPatch) -> Iterator[threading.Event]:
+    entered = threading.Event()
+    original = ssl.SSLSocket.do_handshake
+
+    def traced(self: ssl.SSLSocket, block: bool = False) -> None:
+        entered.set()
+        original(self, block)
+
+    monkeypatch.setattr(ssl.SSLSocket, "do_handshake", traced)
+    yield entered
+
+
+def test_stop_interrupts_an_implicit_tls_handshake(
+    tls_material: TlsMaterial, handshake_traced: threading.Event
+) -> None:
+    before = set(threading.enumerate())
+    server = FakeImapServer(tls=tls_material, implicit_tls=True)
+    server.start()
+    raw = Raw(server)
+    assert handshake_traced.wait(TIMEOUT)
+    _stop_promptly_without_leaks(server, before)
+    raw.close()
+
+
+@pytest.mark.parametrize("after_ok", [b"", b"\x16\x03\x01"], ids=["silent", "partial-record"])
+def test_stop_interrupts_a_connection_after_starttls_ok(
+    tls_material: TlsMaterial, handshake_traced: threading.Event, after_ok: bytes
+) -> None:
+    before = set(threading.enumerate())
+    server = FakeImapServer(tls=tls_material)
+    server.start()
+    raw = Raw(server)
+    raw.read_until(b"\r\n")
+    raw.send(b"a1 STARTTLS\r\n")
+    assert raw.read_until(b"\r\n") == b"a1 OK begin TLS\r\n"
+    if after_ok:
+        raw.send(after_ok)
+        assert handshake_traced.wait(TIMEOUT)
+    _stop_promptly_without_leaks(server, before)
     raw.close()
 
 
@@ -443,6 +493,29 @@ def test_plaintext_sent_after_starttls_is_logged_not_discarded(
     assert [c.verb for c in fake_imap_tls.commands] == ["STARTTLS", "LOGIN", "NOOP"]
     assert fake_imap_tls.events.count("pre-tls-bytes") == 1
     assert fake_imap_tls.events.index("pre-tls-bytes") < fake_imap_tls.events.index("handshake")
+    raw.close()
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["separate-write", "during-hold"])
+def test_plaintext_login_after_starttls_ok_is_logged_and_skips_handshake(
+    fake_imap_tls: FakeImapServer, held: bool
+) -> None:
+    release = threading.Event()
+    if held:
+        fake_imap_tls.starttls_hold = release
+    raw = Raw(fake_imap_tls)
+    raw.read_until(b"\r\n")
+    raw.send(b"a1 STARTTLS\r\n")
+    assert raw.read_until(b"\r\n") == b"a1 OK begin TLS\r\n"
+    if held:
+        fake_imap_tls.wait_for("starttls-held")
+    raw.send(b"a2 LOGIN user@example.com dummy\r\n")
+    release.set()
+    assert raw.read_until(b"\r\n") == b"a2 OK done\r\n"
+    assert fake_imap_tls.wire == ["a1 STARTTLS", "a2 LOGIN user@example.com dummy"]
+    assert [c.verb for c in fake_imap_tls.commands] == ["STARTTLS", "LOGIN"]
+    assert fake_imap_tls.events.count("pre-tls-bytes") == 1
+    assert "handshake" not in fake_imap_tls.events
     raw.close()
 
 
