@@ -40,8 +40,8 @@ V1–V4 run in parallel with each other and with F0. Each pairs `mf-researcher` 
 | B7 | `write/api.py`, `smtp/api.py` protocols (A§2.5) + the AST and import-graph tests that keep them implementation-free and unimported | F0 | T-10 | sonnet / medium |
 | B2 | `providers/`: preset data (generic, hetzner), user presets, merge rules | B1 | — | sonnet / medium |
 | B3 | `logging.py`: stderr-only, redaction set (raw, IMAP-quoted, PLAIN blob), LOGIN/AUTHENTICATE and continuation-line redaction, no mail-derived strings in records | F0 | T-03, T-21 | sonnet / medium |
-| B4 | `credentials/` protocol, `Secret`, typed errors, `keyring` backend, backend detection (fail/null/plaintext, WSL), `<login>@<host>` entry key | F0, B3 | T-01, T-02, T-03, T-11 | sonnet / medium |
-| B5 | `credentials/` `command` backend: process-tree timeout (`L-14`), pipe deadline, output cap (`L-22`), minimal env, binding-record check | B4, V3 | T-11, T-17 | sonnet / medium |
+| B4 | `credentials/` protocol, `Secret`, typed errors, `keyring` backend read through a bounded probe subprocess after the bus-address pre-check (`L-27`, `L-22`, A§2.1), backend detection (fail/null/plaintext, WSL; raw D-Bus errors as unavailable), `<login>@<host>` entry key. The probe bound counts as tested only with a retained mute-bus repro (V3 E6) | F0, B3, V3 | T-01, T-02, T-03, T-11, T-17 | sonnet / medium |
+| B5 | `credentials/` `command` backend: process-tree timeout (`L-14`) with daemon readers and a fail-closed return, output cap while reading (`L-22`), minimal env, binding-record check; `pass` recipe with `--pinentry-mode=error`, a gpg status channel via `pass_fds` and `locked` from status codes (A§2.1); tests include a `setsid` descendant holding stdout and a locked store through the real spawn path | B4, V3 | T-02, T-03, T-11, T-17 | sonnet / medium |
 | B6 | `limits.py` (top level, imported by every layer): the L-table as one frozen model, config merge | B1 | all `L-nn` | sonnet / medium |
 
 ### Phase 2c: content (pure, fixture-driven)
@@ -49,10 +49,10 @@ V1–V4 run in parallel with each other and with F0. Each pairs `mf-researcher` 
 | ID | Task | Deps | Threats | Model / effort |
 |---|---|---|---|---|
 | C0 | Fixture corpus, generators and Hypothesis strategies for MIME/charset/alias fuzzing (§3.1) | F0 | T-04, T-05, T-06, T-19 | sonnet / medium |
-| C1 | `content/charset.py`, `headers.py`, `truncate.py`: fallback chain, RFC 2047/2231, codepoint-safe truncation, incremental tail handling | C0, B6 | T-19, T-05 | **sonnet / high** |
+| C1 | `content/charset.py`, `headers.py`, `truncate.py`: fallback chain, RFC 2047/2231, codepoint-safe truncation, incremental tail handling, address formatting from imapclient `Address` fields (never `str(Address)`, A§2.2) | C0, B6 | T-19, T-05, T-21 | **sonnet / high** |
 | C2 | `content/mime.py`: bounded BODYSTRUCTURE and MIME walk, part selection, per-part fault isolation | C1 | T-05 | **sonnet / high** |
 | C3 | `content/html.py` + `Cf` stripping: hidden-content removal, then `inscriptis`, notes | C1 | T-04, T-18 | **sonnet / high** |
-| C4 | `content/pdf_worker.py` + extractor registry (PDF, text, HTML) with subprocess limits | C2, V1 | T-06 | **sonnet / high** |
+| C4 | `content/pdf_worker.py` + extractor registry (PDF, text, HTML) with subprocess limits; pypdf `Configuration` fields from `L-10`/`L-09` (T-06); the Windows job-object and macOS `RLIMIT_AS` memory caps researched and run on windows and macos CI runners; cyclic page-tree and 100,000-page bombs (A§10 item 10) | C2, V1 | T-06 | **sonnet / high** |
 | C5 | `aliases/` resolver: header priority, plus separator, domains, exact and wildcard match, aggregation | C1 | T-09 | sonnet / medium |
 
 ### Phase 2d: IMAP and query
@@ -60,11 +60,11 @@ V1–V4 run in parallel with each other and with F0. Each pairs `mf-researcher` 
 | ID | Task | Deps | Threats | Model / effort |
 |---|---|---|---|---|
 | D0 | Recording fake IMAP server for tests (scripted capabilities and responses, wire log) | F0 | T-07, T-08, T-10 | sonnet / medium |
-| D1 | `imap/` connect: TLS modes, STARTTLS rules, timeouts, capability parsing | B6, D0, V1 | T-07 | sonnet / medium |
-| D2 | `imap/` guard + `ReadOnlySession` + read-side caps + deadline cancellation by socket shutdown (`L-13`) | D1 | T-08, T-10 | sonnet / medium |
-| D3 | `auth/` protocol + `PasswordAuth`: mechanism choice from post-TLS capabilities, persistent auth-failed marker | B4, D2, D4 | T-03, T-16 | sonnet / medium |
-| D4 | GreenMail harness: compose file `tests/integration/docker-compose.yml`, auth-enabled users, CA, APPEND-based seeding from C0, two-account setup | V2, C0 | T-14 | sonnet / medium |
-| D5 | `query/` folders + search: criteria list builder, SORT branch, paging cursor, caps, has-attachment and alias post-filters (A§2.6, `L-23`–`L-25`) | D3, C5, D4 | T-09, T-14 | sonnet / medium |
+| D1 | `imap/` connect: TLS modes, STARTTLS rules with the buffered-bytes probe by feature (A§2.2), timeouts, capability parsing; the STARTTLS injection test on every supported Python minor | B6, D0, V1 | T-07 | sonnet / medium |
+| D2 | `imap/` guard mixin on `_new_tag` + `send` with the fail-closed send gate, reset on abort and reconnect (A§6) + `ReadOnlySession` + per-command literal caps and response total (`L-26`) + `imaplib._MAXLINE` from `L-20` + imapclient logging pin and fixed error codes for library exceptions + `login` taking `str` only + deadline cancellation by socket shutdown (`L-13`); decides the `{n+}` literal rule (A§6); wire-survey and send-gate tests on every supported minor (SECURITY §3) | D1 | T-02, T-03, T-08, T-10, T-21 | sonnet / medium |
+| D3 | `auth/` protocol + `PasswordAuth`: mechanism choice from post-TLS capabilities, the `isascii()` branch with the T-02 test on the `imap/` login path, persistent auth-failed marker | B4, D2, D4 | T-02, T-03, T-16 | sonnet / medium |
+| D4 | GreenMail harness: compose file `tests/integration/docker-compose.yml`, auth-enabled users, CA, APPEND-based seeding from C0, two-account setup, per the V2 note's decisions and D4 requirements (image pinned by digest, the `ca_file` check through mailferret's TLS context, a `\Seen` control test, the plaintext port as a no-STARTTLS case). Capabilities GreenMail lacks are covered on D0 | V2, C0 | T-07, T-14 | sonnet / medium |
+| D5 | `query/` folders + search: criteria list builder, SORT branch, windowed UID ranges so no response line exceeds `L-20` (A§2.6), paging cursor, caps, has-attachment and alias post-filters (A§2.6, `L-23`–`L-25`) | D3, C5, D4 | T-08, T-09, T-14 | sonnet / medium |
 | D6 | `query/` fetch + `get_message` assembly (A§3) | D5, C2, C3, D4 | T-05, T-08 | sonnet / medium |
 | D7 | `query/` thread (THREAD=REFERENCES branch and header fallback) and attachments | D6, C4 | T-05 | sonnet / medium |
 
@@ -74,25 +74,25 @@ V1–V4 run in parallel with each other and with F0. Each pairs `mf-researcher` 
 |---|---|---|---|---|
 | E1 | `server/` envelope (A§2.4 escaping) + output models + `CallToolResult` builder with the `L-19` count and trim | B6, C3 | T-04 | sonnet / medium |
 | E2 | `server/` app and tools, annotations, instructions, errors incl. `not_configured`, exact tool-set test, `message_ref`, `search` `Field` descriptions with examples (replaces the rejected search-syntax skill) | E1, D5, D6, D7, D4 | T-04, T-10, T-14, T-21 | sonnet / medium |
-| E3 | `cli/`: `serve`, `accounts list`, `auth set` (TTY check before `getpass`, `--stdin`, refused under `CLAUDECODE=1`; writes the binding record, clears the auth-failed marker), `auth retry` | E2, B5 | T-01, T-03, T-11, T-16, T-20 | sonnet / medium |
+| E3 | `cli/`: `serve`, `accounts list`, `auth set` (TTY check before `getpass`, `--stdin`, refused under `CLAUDECODE=1` or `CLAUDE_CODE_CHILD_SESSION`; writes the binding record, clears the auth-failed marker), `auth retry` | E2, B5 | T-01, T-03, T-11, T-16, T-20 | sonnet / medium |
 | E4 | `cli/setup`: interactive (same TTY rules as `auth set`), preset or manual, read-only connection test | E3, B2 | T-01, T-20 | sonnet / medium |
-| E5 | `cli/doctor`: config, permissions, backend, connectivity, TLS, every visible registration (incl. a manual entry shadowing a later plugin install) with its absolute launcher and constraints paths checked for existence and permissions, including the Linux-side `uvx` of a `wsl.exe` Desktop entry (A§9.5) | E3, F2 | T-11, T-17 | sonnet / medium |
+| E5 | `cli/doctor`: config, permissions, backend (incl. the keyring bus-address pre-check), connectivity, TLS, every visible registration (incl. a manual entry duplicating or suppressing a later plugin install) with its absolute launcher and constraints paths checked for existence and permissions, including the Linux-side launcher script of a `wsl.exe` Desktop entry, its mode and its parent directory (A§9.5, A§9.6) | E3, F2 | T-11, T-12, T-17 | sonnet / medium |
 
 ### Phase 2f: registration and plugin
 
 | ID | Task | Deps | Threats | Model / effort |
 |---|---|---|---|---|
 | F1 | `registration/` core: discovery, backup, atomic write, duplicate detection | B1, V4 | T-12 | sonnet / medium |
-| F2 | `register claude-code` (via `claude mcp add-json`) + `register claude-desktop` (regular, MSIX, WSL→Windows), `--print`, `--force` policy printing the plugin disable/uninstall command, scope-limited detection notice, backup of the scope's file before `claude mcp add-json`, launcher selection, constraints file copied to the data dir, absolute `wsl.exe --exec` entries (A§9.4, A§9.5, A§9.6) | F1, E3 | T-12 | sonnet / medium |
-| P1 | Plugin skeleton: `plugin/` manifests, `.mcp.json` with pin and `--constraints`, constraints generation, marketplace, `claude plugin validate --strict` in CI, version-set check (A§9.4) | E2 | T-13 | opus / medium |
-| P2 | `mail-reader` agent and `doctor` skill per A§9.7 (enumerated tools, stop-if-missing, output contract, `maxTurns`; ground-truth branch, exact pre-approvals, MCP_TIMEOUT detection) + the CI test that the agent's tools equal the server's read tools | P1, E5 | T-04, T-15, T-18 | opus / medium |
-| P3 | Plugin evals in `plugin-evals/` with mocked IMAP via `MAILFERRET_CONFIG` (`claude plugin eval`), incl. an injection mail through `mail-reader`. The harness runs a test copy of the plugin whose `.mcp.json` launches the PR tree (`uvx --from <repo path> mailferret serve`), so evals need no PyPI release and test the PR's code | P2, D0 | T-04, T-18 | opus / medium |
+| F2 | `register claude-code` (via `claude mcp add-json`) + `register claude-desktop` (regular; MSIX only with `--desktop-config`; WSL→Windows through a generated launcher script, T-12), `--print`, `--force` policy printing the plugin disable/uninstall command, plugin detection reporting scope and `projectPath`, backup of the scope's file before `claude mcp add-json`, launcher selection, constraints file copied to the data dir (A§9.4, A§9.5, A§9.6) | F1, E3 | T-11, T-12 | sonnet / medium |
+| P1 | Plugin skeleton: `plugin/` manifests, `.mcp.json` with pin and `--constraints`, constraints generation, marketplace, `claude plugin validate --strict` in CI, version-set check (A§9.4); decides whether `--exclude-newer` joins the pins (A§9.2) | E2 | T-13 | opus / medium |
+| P2 | `mail-reader` agent and `doctor` skill per A§9.7 (enumerated tools plus `disallowedTools: Skill, Agent`, stop-if-missing, output contract, `maxTurns`; ground-truth branch accepting both tool prefixes, shell-tool branch for the `uvx` lookup, exact pre-approvals, MCP_TIMEOUT detection) + the CI test that the agent's tools equal the server's read tools | P1, E5 | T-04, T-15, T-18 | opus / medium |
+| P3 | Plugin evals in `plugin/evals/` (`claude plugin eval`) with MCP mocks and the invocation of A§9.8, incl. a synthetic injection mail through `mail-reader`; asserts the agent's runtime tool list (no Skill, no Agent, nothing outside the plugin's mailferret tools), with the user's `/smoke-test` as the backstop; decides whether the injection fixture ships or is generated at eval time | P2, D0 | T-04, T-15, T-18 | opus / medium |
 
 ### Phase 2g: docs and release
 
 | ID | Task | Deps | Threats | Model / effort |
 |---|---|---|---|---|
-| G1 | README: install, setup, credentials per platform (incl. the WSL recipe), config reference, registration, generic MCP client setup, presets, the T-18 residual risk | E5, F2, P2 | — | sonnet / low |
+| G1 | README: install, setup, credentials per platform (incl. the WSL recipe and exporting `DBUS_SESSION_BUS_ADDRESS` for keyring), config reference, registration, generic MCP client setup, presets, zip-upload instructions for claude.ai (A§10 item 9), the T-18 residual risk | E5, F2, P2 | — | sonnet / low |
 | G2 | Release workflow: tag → trusted publishing → uvx smoke → plugin pin bump PR that regenerates `constraints.txt` (A§9.4); the first release claims the PyPI name and is followed by the PR that adds the marketplace entry | P1 | T-13 | sonnet / medium |
 
 ## 3. Test strategy
@@ -114,15 +114,16 @@ Committed `.eml` files (small, synthetic, `example.com` only) plus generators fo
 | Layer | Runs on | What |
 |---|---|---|
 | Unit (pure modules) | Linux, Windows, macOS | `content/`, `aliases/`, `config/`, `credentials/` (in-memory and fake-command backends), `registration/` (temp dirs, fake platform roots) |
-| Fake IMAP server (D0) | Linux, Windows, macOS | Guard wire tests, capability branches GreenMail lacks, TLS/STARTTLS failure modes, hostile responses (T-07, T-08, T-09, T-10) |
-| GreenMail integration | Linux CI and local Docker | All tools end to end, `\Seen` and flags unchanged, two accounts, login failure without retry, `ca_file` |
-| Plugin | Linux CI | `claude plugin validate --strict`, version-coupling check, evals with mocked IMAP (P3) |
+| Fake IMAP server (D0) | Linux, Windows, macOS | Guard wire and send-gate tests, capability branches GreenMail lacks (STARTTLS, CONDSTORE, THREAD, SPECIAL-USE), TLS/STARTTLS failure modes, hostile responses, the AUTHENTICATE PLAIN leg of `test_login_redaction` (T-03, T-07, T-08, T-09, T-10) |
+| GreenMail integration | Linux CI and local Docker | All tools end to end, `\Seen` and flags unchanged, two accounts, login failure without retry, `ca_file`, the plaintext port as a no-STARTTLS case, the LOGIN leg of `test_login_redaction` |
+| Plugin | Linux CI | `claude plugin validate --strict`, version-coupling check, evals with MCP mocks (P3, A§9.8) |
 
 No test touches a real mailbox. Integration tests are marked and skipped when Docker is unavailable, with a visible skip reason.
 
 ### 3.3 CI
 
-- Matrix: `ubuntu`, `windows`, `macos` × Python floor and latest: lint, `mypy --strict`, unit and fake-server tests.
+- Matrix: `ubuntu`, `windows`, `macos` × Python floor and latest: lint, `mypy --strict`, unit and fake-server tests, including the PDF worker memory-cap tests (C4).
+- Every supported Python minor, not only floor and latest: the `imap/` private-API tests (wire survey, send gate, STARTTLS probe; A§2.2).
 - Linux only: GreenMail integration, plugin validation, the dependency audit, `uv lock --check`, the personal-data grep.
 
 ## 4. Review gate (per PR)
@@ -142,8 +143,8 @@ Reached when all of:
 
 - Every task through E5 and F2 is merged with its gate passed.
 - The full unit and fake-server suite is green on Linux, Windows and macOS.
-- The GreenMail integration suite is green against Docker GreenMail, including `test_no_mutation`, `test_login_redaction`, the two-account tests and the TLS `ca_file` tests.
-- Every `T-nn` in SECURITY §4 has its verification test, and every `L-nn` has a test that crosses it. Exempt until P2/P3: the plugin-side parts of T-15 (agent tools parity test) and T-18 (injection eval).
+- The GreenMail integration suite is green against Docker GreenMail, including `test_no_mutation`, the LOGIN leg of `test_login_redaction` (its AUTHENTICATE PLAIN leg is in the fake-server suite), the two-account tests and the TLS `ca_file` tests.
+- Every `T-nn` in SECURITY §4 has its verification test, and every `L-nn` has a test that crosses it. Exempt until P2/P3: the plugin-side parts of T-04 (the agent's runtime tool list), T-15 (agent tools parity test) and T-18 (injection eval).
 - `claude plugin validate --strict` passes on P1.
 
 Plugin components (P2, P3), the README (G1) and the release (G2) follow Checkpoint 2.
