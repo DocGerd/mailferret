@@ -1,6 +1,6 @@
 # V2: GreenMail for IMAP integration tests
 
-Run against `greenmail/standalone:2.1.15` (Docker, Linux) on the checks listed at the end. Sources: the GreenMail docs and the master source of CapabilityCommand.java and ImapConstants.java.
+Run against `greenmail/standalone:2.1.15` (Docker, Linux) on the checks listed at the end (the TLS/auth subset; the other findings used ad-hoc IMAP commands). Sources: the GreenMail docs and CapabilityCommand.java and ImapConstants.java at tag `release-2.1.15`.
 
 ## Findings
 - Ports with `-Dgreenmail.setup.test.all`: IMAP 3143, IMAPS 3993, API 8080 (also SMTP 3025, SMTPS 3465, POP3 3110, POP3S 3995).
@@ -27,13 +27,19 @@ Run against `greenmail/standalone:2.1.15` (Docker, Linux) on the checks listed a
 
 ## Decisions
 - GreenMail covers IMAPS, LOGIN auth, flags and `\Seen` unchanged, two accounts, login failure and `ca_file`.
-- T-03 `test_login_redaction`: the AUTHENTICATE PLAIN leg runs on the D0 fake server (GreenMail rejects PLAIN); the LOGIN leg runs on GreenMail. SECURITY T-03 needs a follow-up edit (not in this PR).
+- T-03 `test_login_redaction`: the AUTHENTICATE PLAIN leg runs on the D0 fake server (GreenMail rejects PLAIN); the LOGIN leg runs on GreenMail. SECURITY T-03 needs a follow-up edit (not in this PR), tracked in issue #7.
 - D4 connects to host `localhost` (both forms verify; `localhost` matches the cert CN).
 - STARTTLS, CONDSTORE, ESEARCH, THREAD and SPECIAL-USE positive paths are tested only on the D0 fake server (T-07). D4 also uses plaintext port 3143 as a real-server "STARTTLS not advertised" case (hard error, no LOGIN sent). The T-07 GreenMail check (fails without `ca_file`, passes with it) is confirmed with `imaplib`.
 - Override `GREENMAIL_OPTS` in full, without `auth.disabled`.
-- Generate a throwaway cert at test time (SAN `localhost` and `127.0.0.1`), pack it into PKCS12, mount it read-only, pass the cert PEM as `ca_file`. Generate into a private `mktemp -d` outside the work tree; D4 must gitignore `tests/integration/certs/`. Never commit key material.
+- Generate a throwaway cert at test time (SAN `localhost` and `127.0.0.1`), pack it into PKCS12, mount it read-only, pass the cert PEM as `ca_file`. Generate into a `mktemp -d` outside the work tree. The key is throwaway (trusted only via the test's `ca_file`, valid 2 days) and the PKCS12 is world-readable (644 in a 755 dir) so the container user can read it; acceptable on a dev/CI host. Never commit key material.
 - Seed mail by APPEND. Do not rely on SMTP delivery.
-- Pin the image `greenmail/standalone:2.1.15`.
+- Pin the image `greenmail/standalone:2.1.15`; D4 adds the digest (see D4 requirements).
+
+## D4 requirements
+- Run the `ca_file` fails-without/passes-with check through mailferret's own TLS context builder (system store plus `load_verify_locations`, TLS 1.2 minimum), not `ssl.create_default_context(cafile=...)`, which the spike used and skips the system store.
+- Add a control test that `SELECT` plus `FETCH BODY[]` sets `\Seen` on GreenMail, so `test_no_mutation` can fail.
+- Pin the image by digest (`greenmail/standalone:2.1.15@sha256:...`) and record it beside the vetted version.
+- Gitignore `tests/integration/certs/`.
 - Wait for readiness before connecting (poll the IMAPS port); `docker compose up -d` returns before the JVM listens (not timed here).
 
 ## Compose (as run)
@@ -56,11 +62,11 @@ Test logins: `alice@example.com` and `bob@example.com`; the password is the part
 ## Commands (as run)
 Cert (the self-signed cert is also the CA):
 
-    certs=$(mktemp -d)   # outside the work tree; mounted as /certs
-    openssl req -x509 -newkey rsa:2048 -nodes -keyout "$certs/k.pem" -out "$certs/ca.pem" -days 2 -subj /CN=localhost -addext subjectAltName=DNS:localhost,IP:127.0.0.1
-    openssl pkcs12 -export -in "$certs/ca.pem" -inkey "$certs/k.pem" -out "$certs/greenmail.p12" -passout pass:<store-pw>
-    rm "$certs/k.pem"; chmod 644 "$certs/greenmail.p12" "$certs/ca.pem"; chmod 755 "$certs"
+    export CERTS_DIR=$(mktemp -d)   # outside the work tree; mounted as /certs
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout "$CERTS_DIR/k.pem" -out "$CERTS_DIR/ca.pem" -days 2 -subj /CN=localhost -addext subjectAltName=DNS:localhost,IP:127.0.0.1
+    openssl pkcs12 -export -in "$CERTS_DIR/ca.pem" -inkey "$CERTS_DIR/k.pem" -out "$CERTS_DIR/greenmail.p12" -passout pass:<store-pw>
+    rm "$CERTS_DIR/k.pem"; chmod 644 "$CERTS_DIR/greenmail.p12" "$CERTS_DIR/ca.pem"; chmod 755 "$certs"
     docker compose up -d
 
-Checks: `IMAP4_SSL` to `localhost` and `127.0.0.1` with and without `cafile`; forced `AUTHENTICATE PLAIN` over IMAPS with and without an initial response; `printf 'a CAPABILITY\r\nb STARTTLS\r\nc LOGOUT\r\n' | nc -w3 127.0.0.1 3143`; `openssl s_client -connect 127.0.0.1:3993 -CAfile "$certs/ca.pem" -verify_return_error -verify_hostname localhost </dev/null`; `imaplib.IMAP4_SSL('127.0.0.1', 3993, ssl_context=ssl.create_default_context(cafile=certs + '/ca.pem'))` then `login('alice@example.com', 'pw-a')`. Teardown: `docker compose down -v`.
+Checks: `IMAP4_SSL` to `localhost` and `127.0.0.1` with and without `cafile`; forced `AUTHENTICATE PLAIN` over IMAPS with and without an initial response; `printf 'a CAPABILITY\r\nb STARTTLS\r\nc LOGOUT\r\n' | nc -w3 127.0.0.1 3143`; `openssl s_client -connect 127.0.0.1:3993 -CAfile "$CERTS_DIR/ca.pem" -verify_return_error -verify_hostname localhost </dev/null`; `imaplib.IMAP4_SSL('127.0.0.1', 3993, ssl_context=ssl.create_default_context(cafile=os.environ['CERTS_DIR'] + '/ca.pem'))` then `login('alice@example.com', 'pw-a')`. Teardown: `docker compose down -v`.
 Note: `imaplib` has no ESEARCH/CONDSTORE helpers; send them with `_simple_command`.
