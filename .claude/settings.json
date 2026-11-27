@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(uv run pytest *)",
+      "Bash(uv run ruff *)",
+      "Bash(uv run mypy *)",
+      "Bash(uvx ruff *)",
+      "Bash(uv sync *)",
+      "Bash(uv lock *)",
+      "Bash(docker compose up *)",
+      "Bash(docker compose down *)",
+      "Bash(docker compose ps *)",
+      "Bash(docker compose logs *)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git show *)",
+      "Bash(git branch)",
+      "Bash(git branch --show-current)",
+      "Bash(git branch --list *)",
+      "Bash(git branch -a)",
+      "Bash(git branch -vv)",
+      "Bash(python3 scripts/pii_check.py *)"
+    ],
+    "deny": [
+      "Read(~/.password-store/**)",
+      "Read(~/.gnupg/**)",
+      "Read(~/.local/share/keyrings/**)",
+      "Read(~/Library/Keychains/**)",
+      "Read(//Library/Keychains/**)",
+      "Read(~/AppData/Roaming/Microsoft/Credentials/**)",
+      "Read(~/AppData/Local/Microsoft/Credentials/**)",
+      "Read(~/AppData/Roaming/Microsoft/Protect/**)",
+      "Read(//mnt/*/Users/*/AppData/Roaming/Microsoft/Credentials/**)",
+      "Read(//mnt/*/Users/*/AppData/Local/Microsoft/Credentials/**)",
+      "Read(//mnt/*/Users/*/AppData/Roaming/Microsoft/Protect/**)",
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Read(~/.config/mailferret/**)",
+      "Read(~/Library/Application Support/mailferret/**)",
+      "Read(~/AppData/Roaming/mailferret/**)",
+      "Read(//mnt/*/Users/*/AppData/Roaming/mailferret/**)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv",
+            "args": ["run", "--no-project", "--quiet", "python", "${CLAUDE_PROJECT_DIR}/.claude/hooks/ruff_fix.py"],
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(git *)",
+            "command": "uv",
+            "args": ["run", "--no-project", "--quiet", "python", "${CLAUDE_PROJECT_DIR}/.claude/hooks/commit_guard.py", "pii"],
+            "timeout": 150
+          },
+          {
+            "type": "command",
+            "if": "Bash(git *)",
+            "command": "uv",
+            "args": ["run", "--no-project", "--quiet", "python", "${CLAUDE_PROJECT_DIR}/.claude/hooks/commit_guard.py", "tests"],
+            "timeout": 600
+          }
+        ]
+      }
+    ]
+  }
+}
