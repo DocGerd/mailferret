@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from mailferret.config import ConfigError, load, parse, resolve_location, write
-from mailferret.config.paths import default_config_path
+from mailferret.config import ConfigError, load, parse, paths, resolve_location, write
+from mailferret.config.paths import default_config_path as real_default_config_path
 
 ACCOUNT = """# keep me
 [accounts.work]
@@ -20,6 +20,8 @@ def _isolated_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.delenv("MAILFERRET_CONFIG", raising=False)
+    sandbox = tmp_path / "default" / "config.toml"
+    monkeypatch.setattr(paths, "default_config_path", lambda: sandbox)
 
 
 def test_missing_default_file_means_no_accounts() -> None:
@@ -29,7 +31,7 @@ def test_missing_default_file_means_no_accounts() -> None:
 def test_missing_env_override_means_no_accounts_not_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    default = default_config_path()
+    default = paths.default_config_path()
     default.parent.mkdir(parents=True)
     default.write_text(ACCOUNT)
     assert "work" in load().accounts
@@ -38,7 +40,7 @@ def test_missing_env_override_means_no_accounts_not_default(
 
 
 def test_missing_flag_means_no_accounts_not_default(tmp_path: Path) -> None:
-    default = default_config_path()
+    default = paths.default_config_path()
     default.parent.mkdir(parents=True)
     default.write_text(ACCOUNT)
     assert load(tmp_path / "missing.toml").accounts == {}
@@ -58,13 +60,13 @@ def test_env_beats_default(tmp_path: Path) -> None:
 
 def test_empty_env_falls_back_to_default() -> None:
     location = resolve_location(None, {"MAILFERRET_CONFIG": ""})
-    assert location.path == default_config_path()
+    assert location.path == paths.default_config_path()
     assert not location.overridden
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="XDG applies to POSIX")
 def test_default_path_follows_xdg(tmp_path: Path) -> None:
-    assert default_config_path() == tmp_path / "xdg" / "mailferret" / "config.toml"
+    assert real_default_config_path() == tmp_path / "xdg" / "mailferret" / "config.toml"
 
 
 def test_write_then_load_roundtrip(tmp_path: Path) -> None:
