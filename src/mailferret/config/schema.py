@@ -74,6 +74,7 @@ class Limits(_Strict):
     max_criteria: int | None = None
     fetch_batch_size: int | None = None
     max_command_response_bytes: int | None = None
+    max_response_line_bytes: int | None = None
     keyring_probe_seconds: int | None = None
     credential_stderr_bytes: int | None = None
     credential_status_bytes: int | None = None

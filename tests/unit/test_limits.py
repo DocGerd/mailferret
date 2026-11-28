@@ -44,6 +44,7 @@ SECURITY_TABLE = {
     "L-27": {"keyring_probe_seconds": 10},
     "L-28": {"credential_stderr_bytes": 16 * 1024},
     "L-29": {"credential_status_bytes": 16 * 1024},
+    "L-32": {"max_response_line_bytes": 5 * MIB // 2},
 }
 EXPECTED = {k: v for row in SECURITY_TABLE.values() for k, v in row.items()}
 
@@ -71,6 +72,11 @@ def test_response_ceiling_covers_a_full_fallback_fetch() -> None:
     assert CEILINGS["max_command_response_bytes"] == (
         CEILINGS["max_message_bytes"] + 2 * CEILINGS["max_line_bytes"]
     )
+
+
+def test_line_ceiling_exceeds_one_line_and_stays_under_the_response_total() -> None:
+    assert CEILINGS["max_line_bytes"] < CEILINGS["max_response_line_bytes"]
+    assert CEILINGS["max_response_line_bytes"] < CEILINGS["max_command_response_bytes"]
 
 
 def test_model_is_frozen() -> None:
