@@ -30,6 +30,7 @@ _DEFAULT_LIMITS: Final = Limits()
 _TOKEN: Final = re.compile(r"[a-z0-9!#$&^_.+-]{1,64}")
 _TYPE: Final = re.compile(r"[a-z0-9!#$&^_.+-]{1,64}/[a-z0-9!#$&^_.+-]{1,64}")
 _MAX_BOUNDARY: Final = 128
+_SCAN_FACTOR: Final = 4
 _MAX_PARAM_PAIRS: Final = 64
 _MAX_ENCODING_CHARS: Final = 32
 _HEADERS: Final = frozenset(
@@ -38,13 +39,15 @@ _HEADERS: Final = frozenset(
 _BASE64_JUNK: Final = bytes(
     b
     for b in range(256)
-    if b not in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    if b not in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
 )
 _HEX: Final = b"0123456789abcdefABCDEF"
 _IDENTITY_ENCODINGS: Final = frozenset({"7bit", "8bit", "binary", ""})
 _BODY_TYPES: Final = ("text/plain", "text/html")
 
-NoteKind = Literal["limit_exceeded", "malformed", "part_failed", "charset_fallback", "unsupported"]
+NoteKind = Literal[
+    "limit_exceeded", "malformed", "part_failed", "charset_fallback", "unsupported", "extra_text"
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +73,7 @@ class PartInfo:
     filename: str | None = None
     content_id: str | None = None
     span: tuple[int, int] | None = None
+    alternative: str | None = None
 
     @property
     def is_attachment(self) -> bool:
@@ -89,9 +93,12 @@ class MimeTree:
 
 @dataclass(frozen=True, slots=True)
 class BodySelection:
+    """The chosen body, plus inline text parts that are neither it nor one of its alternatives."""
+
     part: PartInfo | None
     fetch_bytes: int
     notes: tuple[Note, ...] = ()
+    extra: tuple[PartInfo, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,20 +186,26 @@ def _is_multipart(node: tuple[object, ...] | list[object]) -> bool:
     return bool(node) and isinstance(node[0], list | tuple)
 
 
-def _children(node: tuple[object, ...] | list[object], budget: int) -> list[object]:
+def _children(node: tuple[object, ...] | list[object], budget: int) -> tuple[list[object], str]:
+    """Children (at most ``budget``) and the multipart subtype (``""`` if not read)."""
     first = node[0]
     if isinstance(first, list):
-        return list(islice(first, budget))
+        return list(islice(first, budget)), _token(node[1], "") if len(node) > 1 else ""
     out: list[object] = []
     for item in islice(node, budget):
         if not isinstance(item, tuple):
             break
         out.append(item)
-    return out
+    subtype = _token(node[len(out)], "") if len(out) < min(budget, len(node)) else ""
+    return out, subtype
 
 
 def _leaf(
-    node: tuple[object, ...] | list[object], section: str, depth: int, limits: Limits
+    node: tuple[object, ...] | list[object],
+    section: str,
+    depth: int,
+    limits: Limits,
+    alternative: str | None = None,
 ) -> PartInfo:
     if len(node) < 7:
         raise ValueError("short body part")
@@ -215,6 +228,7 @@ def _leaf(
         disposition=disposition,
         filename=filename or None,
         content_id=_text(node[3], limits),
+        alternative=alternative,
     )
 
 
@@ -228,11 +242,11 @@ def parse_bodystructure(structure: object, limits: Limits = _DEFAULT_LIMITS) -> 
     parts: list[PartInfo] = []
     if not isinstance(structure, tuple | list) or not structure:
         return MimeTree((), (Note("malformed"),), False)
-    stack: list[tuple[object, int, str]] = [(structure, 1, "")]
+    stack: list[tuple[object, int, str, str | None]] = [(structure, 1, "", None)]
     visited = 0
     failed = False
     while stack:
-        node, depth, section = stack.pop()
+        node, depth, section, alternative = stack.pop()
         if visited >= limits.max_mime_parts:
             notes.add("limit_exceeded", "L-07")
             break
@@ -244,11 +258,15 @@ def parse_bodystructure(structure: object, limits: Limits = _DEFAULT_LIMITS) -> 
             if not isinstance(node, tuple | list) or not node:
                 raise ValueError("not a body part")
             if _is_multipart(node):
-                kids = _children(node, limits.max_mime_parts - visited + 1)
+                kids, subtype = _children(node, limits.max_mime_parts - visited + 1)
+                if not kids:
+                    notes.add("malformed", part=section or "1")
+                    failed = True
+                group = (section or "0") if subtype == "alternative" else alternative
                 for index in reversed(range(len(kids))):
-                    stack.append((kids[index], depth + 1, _join(section, index + 1)))
+                    stack.append((kids[index], depth + 1, _join(section, index + 1), group))
             else:
-                parts.append(_leaf(node, section or "1", depth, limits))
+                parts.append(_leaf(node, section or "1", depth, limits, alternative))
         except Exception:  # per-part fault isolation: hostile shapes raise anything
             notes.add("part_failed", part=section or "1")
             failed = True
@@ -302,56 +320,30 @@ def _read_headers(
     return out
 
 
-def _find_delimiter(
-    raw: bytes, delimiter: bytes, pos: int, end: int, floor: int
-) -> tuple[int, int, bool] | None:
-    """Find the next delimiter line: ``(line_start, next_line_start, closing)``."""
-    while True:
-        at = raw.find(delimiter, pos, end)
-        if at < 0:
-            return None
-        pos = at + 1
-        if at != floor and raw[at - 1] != 10:
-            continue
-        cursor = at + len(delimiter)
-        closing = raw.startswith(b"--", cursor, end)
-        if closing:
-            cursor += 2
-        while cursor < end and raw[cursor] in (32, 9):
-            cursor += 1
-        if cursor >= end:
-            return at, end, closing
-        if raw[cursor] == 10:
-            return at, cursor + 1, closing
-        if raw[cursor] == 13 and raw.startswith(b"\n", cursor + 1, end):
-            return at, cursor + 2, closing
-
-
 def _split_multipart(
     raw: bytes, body_start: int, end: int, boundary: bytes, limit: int
 ) -> tuple[list[tuple[int, int]], bool]:
-    """Child spans (at most ``limit`` + 1) and whether the closing delimiter was seen."""
-    delimiter = b"--" + boundary
+    """Child spans (at most ``limit`` + 1) and whether the closing delimiter was seen.
+
+    The line-anchored delimiter match runs in the ``re`` engine, not in a Python loop.
+    """
+    pattern = re.compile(rb"^--" + re.escape(boundary) + rb"(--)?[ \t]*(?:\r?\n|\Z)", re.MULTILINE)
     spans: list[tuple[int, int]] = []
     child: int | None = None
-    pos = body_start
-    while len(spans) <= limit:
-        found = _find_delimiter(raw, delimiter, pos, end, body_start)
-        if found is None:
-            break
-        line_start, next_start, closing = found
+    for match in pattern.finditer(raw, body_start, end):
         if child is not None:
-            stop = line_start
+            stop = match.start()
             if stop > child and raw[stop - 1] == 10:
                 stop -= 1
                 if stop > child and raw[stop - 1] == 13:
                     stop -= 1
             spans.append((child, stop))
-        child = None if closing else next_start
-        if closing:
+        if match.group(1) is not None:
             return spans, True
-        pos = next_start
-    if child is not None and len(spans) <= limit:
+        child = match.end()
+        if len(spans) > limit:
+            return spans, False
+    if child is not None:
         spans.append((child, end))
     return spans, False
 
@@ -364,6 +356,7 @@ def _raw_leaf(
     depth: int,
     body: tuple[int, int],
     limits: Limits,
+    alternative: str | None = None,
 ) -> PartInfo:
     ctype = parse_header_parameters(headers.get(b"content-type", b""), limits)
     dispo = parse_header_parameters(headers.get(b"content-disposition", b""), limits)
@@ -381,6 +374,7 @@ def _raw_leaf(
         filename=filename or None,
         content_id=_text(cid, limits) if cid is not None else None,
         span=body,
+        alternative=alternative,
     )
 
 
@@ -397,10 +391,11 @@ def walk_message(raw: bytes, limits: Limits = _DEFAULT_LIMITS) -> MimeTree:
         notes.add("limit_exceeded", "L-01")
     parts: list[PartInfo] = []
     failed = False
-    stack: list[tuple[int, int, int, str, str]] = [(0, end, 1, "", "text/plain")]
+    stack: list[tuple[int, int, int, str, str, str | None]] = [(0, end, 1, "", "text/plain", None)]
+    scan_left = _SCAN_FACTOR * limits.max_message_bytes
     visited = 0
     while stack:
-        start, stop, depth, section, default = stack.pop()
+        start, stop, depth, section, default, alternative = stack.pop()
         if visited >= limits.max_mime_parts:
             notes.add("limit_exceeded", "L-07")
             break
@@ -412,15 +407,28 @@ def walk_message(raw: bytes, limits: Limits = _DEFAULT_LIMITS) -> MimeTree:
             header_end, body_start = _header_block(raw, start, stop)
             headers = _read_headers(raw, start, header_end, limits, notes)
             ctype = parse_header_parameters(headers.get(b"content-type", b""), limits)
-            content_type = (
-                ctype.value
-                if _TOKEN.fullmatch(ctype.value.replace("/", "", 1)) and "/" in ctype.value
-                else default
-            )
+            content_type = ctype.value if _TYPE.fullmatch(ctype.value) else default
             if content_type.startswith("multipart/"):
                 boundary = ctype.parameters.values.get("boundary", "").encode("utf-8", "replace")
                 kids: list[tuple[int, int]] = []
                 if 0 < len(boundary) <= _MAX_BOUNDARY:
+                    cost = stop - body_start
+                    if cost > scan_left:
+                        notes.add("limit_exceeded", "L-01")
+                        parts.append(
+                            _raw_leaf(
+                                raw,
+                                headers,
+                                "application/octet-stream",
+                                section or "1",
+                                depth,
+                                (body_start, stop),
+                                limits,
+                                alternative,
+                            )
+                        )
+                        continue
+                    scan_left -= cost
                     room = limits.max_mime_parts - visited + 1
                     kids, closed = _split_multipart(raw, body_start, stop, boundary, room)
                     if kids and not closed and len(kids) <= room:
@@ -428,6 +436,9 @@ def walk_message(raw: bytes, limits: Limits = _DEFAULT_LIMITS) -> MimeTree:
                 if kids:
                     child_default = (
                         "message/rfc822" if content_type == "multipart/digest" else "text/plain"
+                    )
+                    group = (
+                        (section or "0") if content_type == "multipart/alternative" else alternative
                     )
                     for index in reversed(range(len(kids))):
                         child = kids[index]
@@ -438,6 +449,7 @@ def walk_message(raw: bytes, limits: Limits = _DEFAULT_LIMITS) -> MimeTree:
                                 depth + 1,
                                 _join(section, index + 1),
                                 child_default,
+                                group,
                             )
                         )
                     continue
@@ -445,7 +457,14 @@ def walk_message(raw: bytes, limits: Limits = _DEFAULT_LIMITS) -> MimeTree:
                 content_type = "text/plain"
             parts.append(
                 _raw_leaf(
-                    raw, headers, content_type, section or "1", depth, (body_start, stop), limits
+                    raw,
+                    headers,
+                    content_type,
+                    section or "1",
+                    depth,
+                    (body_start, stop),
+                    limits,
+                    alternative,
                 )
             )
         except Exception:  # per-part fault isolation
@@ -458,26 +477,33 @@ def walk_message(raw: bytes, limits: Limits = _DEFAULT_LIMITS) -> MimeTree:
 
 
 def select_body(tree: MimeTree, limits: Limits = _DEFAULT_LIMITS) -> BodySelection:
-    """Pick the text body: the first inline ``text/plain``, else the first inline ``text/html``.
+    """Pick the body: the first inline text part in document order.
+
+    Only inside a ``multipart/alternative`` does ``text/plain`` win over ``text/html`` (the
+    siblings share ``PartInfo.alternative``). Inline text parts that are neither the body nor
+    one of its alternatives are returned in ``extra``, each with an ``extra_text`` note, so the
+    caller can fetch them instead of losing them.
 
     ``fetch_bytes`` is the partial-fetch length, always ``max_part_bytes`` (L-02): a declared
     size is a hint and never shortens the fetch. A declared size over the cap adds an L-02 note;
     the cap is enforced on read.
     """
-    chosen: PartInfo | None = None
-    for wanted in _BODY_TYPES:
-        for part in tree.parts:
-            if part.content_type == wanted and not part.is_attachment:
-                chosen = part
-                break
-        if chosen is not None:
-            break
-    if chosen is None:
+    inline = [p for p in tree.parts if p.content_type in _BODY_TYPES and not p.is_attachment]
+    if not inline:
         return BodySelection(None, 0)
+    chosen = inline[0]
+    group = chosen.alternative
+    if group is not None:
+        siblings = [p for p in inline if p.alternative == group]
+        chosen = next((p for p in siblings if p.content_type == "text/plain"), chosen)
+    extra = tuple(
+        p for p in inline if p is not chosen and (group is None or p.alternative != group)
+    )
+    notes = [Note("extra_text", None, p.section) for p in extra]
     cap = limits.max_part_bytes
     if chosen.size is not None and chosen.size > cap:
-        return BodySelection(chosen, cap, (Note("limit_exceeded", "L-02", chosen.section),))
-    return BodySelection(chosen, cap)
+        notes.append(Note("limit_exceeded", "L-02", chosen.section))
+    return BodySelection(chosen, cap, tuple(notes), extra)
 
 
 def list_attachments(
@@ -501,12 +527,18 @@ def attachment_fetchable(part: PartInfo, limits: Limits = _DEFAULT_LIMITS) -> bo
 
 
 def _decode_base64(data: bytes, *, partial: bool) -> bytes:
-    clean = data.translate(None, _BASE64_JUNK)
-    tail = len(clean) % 4
+    segments = re.split(rb"=+", data.translate(None, _BASE64_JUNK))
+    out = [_decode_base64_unit(seg, final=True) for seg in segments[:-1]]
+    out.append(_decode_base64_unit(segments[-1], final=not partial))
+    return b"".join(out)
+
+
+def _decode_base64_unit(unit: bytes, *, final: bool) -> bytes:
+    tail = len(unit) % 4
     if tail:
-        clean = clean[:-tail] if partial or tail == 1 else clean + b"=" * (4 - tail)
+        unit = unit[:-tail] if tail == 1 or not final else unit + b"=" * (4 - tail)
     try:
-        return base64.b64decode(clean, validate=True)
+        return base64.b64decode(unit, validate=True)
     except (binascii.Error, ValueError):
         return b""
 
@@ -540,16 +572,18 @@ def decode_part(
 ) -> DecodedPart:
     """Transfer-decode, charset-decode and cap one part's bytes.
 
-    ``data`` is the part body as fetched. Input over ``max_part_bytes`` (L-02) is cut and the
-    result is truncated; output is capped at ``min(max_chars, max_body_chars)`` (L-03), except
-    ``text/html``: its markup is converted first (A§3 step 7), so the caller truncates after that.
+    ``data`` is the part body as fetched. ``partial`` says a partial fetch cut it, which marks the
+    result truncated with an L-02 note. Input over ``max_part_bytes`` (L-02) is cut the same way.
+    Output is capped at ``min(max_chars, max_body_chars)`` (L-03), except ``text/html``: its markup
+    is converted first (A§3 step 7), so the caller truncates after that.
     """
     notes = _Notes()
     cut = len(data) > limits.max_part_bytes
     if cut:
         data = data[: limits.max_part_bytes]
-        notes.add("limit_exceeded", "L-02", part.section)
     incomplete = partial or cut
+    if incomplete:
+        notes.add("limit_exceeded", "L-02", part.section)
     raw = decode_transfer(data, part.encoding, partial=incomplete)
     if raw is None:
         notes.add("unsupported", part=part.section)
@@ -571,7 +605,7 @@ def decode_part(
         part.section,
         text,
         decoded.charset,
-        cut or decoded.truncated or text_cut,
+        incomplete or decoded.truncated or text_cut,
         tuple(notes.items),
     )
 

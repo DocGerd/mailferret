@@ -637,3 +637,139 @@ def test_millions_of_children_are_not_materialised(raw_tuple: bool) -> None:
     peak = _peak(lambda: tree.append(parse_bodystructure(structure)))
     assert ("limit_exceeded", "L-07") in _notes(tree[0])
     assert peak < MIB
+
+
+# --- review fixes -----------------------------------------------------------------------------
+
+
+def _nested_dashes(levels: int, filler: bytes) -> bytes:
+    """Multiparts whose boundaries are runs of ``-`` around a ``-`` filler: worst case for scans."""
+    body = filler
+    for i in reversed(range(levels)):
+        boundary = b"-" * (1 + 3 * i)
+        if i + 1 < levels:
+            inner = b'Content-Type: multipart/mixed; boundary="' + b"-" * (4 + 3 * i) + b'"\r\n\r\n'
+        else:
+            inner = b"Content-Type: text/plain\r\n\r\n"
+        body = b"--" + boundary + b"\r\n" + inner + body + b"\r\n--" + boundary + b"--\r\n"
+    return b'Content-Type: multipart/mixed; boundary="-"\r\n\r\n' + body
+
+
+@pytest.mark.parametrize("line", [b"-", b"----\n", b"--x\r\n"])
+def test_l06_x_l01_rescan_is_bounded_at_default_limits(line: bytes) -> None:
+    limits = Limits()
+    filler = (line * (limits.max_message_bytes // len(line)))[: limits.max_message_bytes - 4096]
+    raw = _nested_dashes(limits.max_mime_depth, filler)
+    started = time.monotonic()
+    tree = walk_message(raw, limits)
+    elapsed = time.monotonic() - started
+    assert ("limit_exceeded", "L-01") in _notes(tree)
+    assert tree.usable and tree.parts
+    assert elapsed < 5
+
+
+def test_scan_budget_degrades_to_an_opaque_leaf() -> None:
+    limits = Limits(max_message_bytes=2048)
+    raw = _nested_dashes(8, b"-" * 1500)
+    tree = walk_message(raw, limits)
+    assert ("limit_exceeded", "L-01") in _notes(tree)
+    assert any(p.content_type == "application/octet-stream" for p in tree.parts)
+    assert select_body(tree).part is None
+
+
+def _mixed_mail(*parts: bytes) -> bytes:
+    body = b"".join(b"--b\r\n" + p + b"\r\n" for p in parts) + b"--b--\r\n"
+    return b'Content-Type: multipart/mixed; boundary="b"\r\n\r\n' + body
+
+
+_TEXT_PLAIN = b"Content-Type: text/plain\r\n\r\nplain text"
+_TEXT_HTML = b"Content-Type: text/html\r\n\r\n<p>html</p>"
+_PNG = b"Content-Type: image/png\r\nContent-Disposition: inline\r\n\r\npng"
+
+
+def _sections(parts: tuple[PartInfo, ...]) -> list[str]:
+    return [p.section for p in parts]
+
+
+def test_html_body_is_not_displaced_by_a_plain_footer() -> None:
+    for tree in (
+        parse_bodystructure(multipart([html_leaf(), text_leaf()])),
+        walk_message(_mixed_mail(_TEXT_HTML, _TEXT_PLAIN)),
+    ):
+        selection = select_body(tree)
+        assert selection.part is not None and selection.part.section == "1"
+        assert selection.part.content_type == "text/html"
+        assert _sections(selection.extra) == ["2"]
+        assert Note("extra_text", None, "2") in selection.notes
+
+
+def test_inline_text_around_an_image_is_exposed_not_lost() -> None:
+    inline_png = (b"image", b"png", None, None, None, b"base64", 3, None, (b"inline", None))
+    for tree in (
+        parse_bodystructure(multipart([text_leaf(), inline_png, text_leaf()])),
+        walk_message(_mixed_mail(_TEXT_PLAIN, _PNG, _TEXT_PLAIN)),
+    ):
+        selection = select_body(tree)
+        assert selection.part is not None and selection.part.section == "1"
+        assert _sections(selection.extra) == ["3"]
+        assert Note("extra_text", None, "3") in selection.notes
+        assert _sections(list_attachments(tree, selection.part).items) == ["2"]
+
+
+def test_plain_wins_only_within_one_alternative_group() -> None:
+    alt_html_first = multipart([html_leaf(), text_leaf()], b"alternative")
+    selection = select_body(parse_bodystructure(multipart([alt_html_first, text_leaf()])))
+    assert selection.part is not None and selection.part.section == "1.2"
+    assert _sections(selection.extra) == ["2"]
+    mail = (
+        b'Content-Type: multipart/alternative; boundary="b"\r\n\r\n'
+        b"--b\r\n" + _TEXT_HTML + b"\r\n--b\r\n" + _TEXT_PLAIN + b"\r\n--b--\r\n"
+    )
+    raw_selection = select_body(walk_message(mail))
+    assert raw_selection.part is not None and raw_selection.part.section == "2"
+    assert raw_selection.extra == ()
+
+
+def test_partial_fetch_marks_the_part_truncated_with_a_note() -> None:
+    html = PartInfo("1", "text/html", "7bit", None, 1, charset="utf-8")
+    result = decode_part(html, b"<p>short</p>", partial=True)
+    assert result.truncated
+    assert Note("limit_exceeded", "L-02", "1") in result.notes
+    assert not decode_part(html, b"<p>short</p>").truncated
+
+
+def test_empty_multipart_is_malformed_and_unusable() -> None:
+    tree = parse_bodystructure(([], b"mixed", None, None, None))
+    assert not tree.usable and not tree.parts
+    assert Note("malformed", None, "1") in tree.notes
+    nested = parse_bodystructure(multipart([text_leaf(), multipart([])]))
+    assert nested.usable and Note("malformed", None, "2") in nested.notes
+
+
+@pytest.mark.parametrize("value", ["text/", "/plain", "text", "a/b/c", "text/pl ain", ""])
+def test_degenerate_content_types_fall_back_to_the_default(value: str) -> None:
+    raw = b"Content-Type: " + value.encode() + b"\r\n\r\nbody"
+    assert walk_message(raw).parts[0].content_type == "text/plain"
+
+
+def test_base64_with_padding_mid_stream() -> None:
+    assert decode_part(_part("base64"), b"YWI=\r\nY2Q=").text == "abcd"
+    assert decode_part(_part("base64"), b"YQ==YQ==YQ==").text == "aaa"
+    assert decode_part(_part("base64"), b"YWJj\r\nZA==\r\n").text == "abcd"
+    assert decode_part(_part("base64"), b"YWI=\r\nY2", partial=True).text == "ab"
+
+
+def test_base64_padding_flood_is_linear() -> None:
+    started = time.monotonic()
+    decode_part(_part("base64"), b"QQ==" * (Limits().max_part_bytes // 4))
+    decode_part(_part("base64"), b"=" * Limits().max_part_bytes)
+    assert time.monotonic() - started < 10
+
+
+def test_a_plain_outside_the_group_never_beats_an_html_alternative() -> None:
+    tree = parse_bodystructure(
+        multipart([multipart([html_leaf(), html_leaf()], b"alternative"), text_leaf()])
+    )
+    selection = select_body(tree)
+    assert selection.part is not None and selection.part.section == "1.1"
+    assert _sections(selection.extra) == ["2"]
