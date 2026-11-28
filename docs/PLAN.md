@@ -51,7 +51,7 @@ V1–V4 run in parallel with each other and with F0. Each pairs `mf-researcher` 
 | C0 | Fixture corpus, generators and Hypothesis strategies for MIME/charset/alias fuzzing (§3.1) | F0 | T-04, T-05, T-06, T-19 | sonnet / medium |
 | C1 | `content/charset.py`, `headers.py`, `truncate.py`: fallback chain, RFC 2047/2231, codepoint-safe truncation, incremental tail handling, address formatting from imapclient `Address` fields (never `str(Address)`, A§2.2) | C0, B6 | T-19, T-05, T-21 | **sonnet / high** |
 | C2 | `content/mime.py`: bounded BODYSTRUCTURE and MIME walk, part selection, per-part fault isolation | C1 | T-05 | **sonnet / high** |
-| C3 | `content/html.py` + `Cf` stripping: hidden-content removal, then `inscriptis`, notes | C1 | T-04, T-18 | **sonnet / high** |
+| C3 | `content/html.py` + `Cf` stripping: hidden-content removal, then own text extraction on `lxml` (no `inscriptis`, see the survey), notes | C1 | T-04, T-18 | **sonnet / high** |
 | C4 | `content/pdf_worker.py` + extractor registry (PDF, text, HTML) with subprocess limits; pypdf `Configuration` fields from `L-10`/`L-09`, found at runtime, with the test that no integer field exceeds `pdf_stream_bytes`, every program field (`jbig2dec_binary`) set to `None` with the fake-`jbig2dec` test, and the `PdfReader` constructor limits at pypdf's defaults (T-06); the Windows job-object and macOS `RLIMIT_AS` memory caps researched and run on windows and macos CI runners; cyclic page-tree and 100,000-page bombs (A§10 item 10) | C2, V1 | T-06 | **sonnet / high** |
 | C5 | `aliases/` resolver: header priority, plus separator, domains, exact and wildcard match, aggregation | C1 | T-09 | sonnet / medium |
 

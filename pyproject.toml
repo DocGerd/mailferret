@@ -10,6 +10,7 @@ dependencies = [
     "click>=8.5,<9",
     "imapclient==4.3.0",
     "keyring>=25.7,<26",
+    "lxml>=6.1,<6.2",
     "platformdirs>=4.14,<5",
     "pydantic>=2.14,<3",
     "tomlkit>=0.15,<0.16",
@@ -51,3 +52,7 @@ python_version = "3.11"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--ignore=tests/tooling -ra --strict-markers --strict-config"
+
+[[tool.mypy.overrides]]
+module = ["lxml", "lxml.*"]
+ignore_missing_imports = true

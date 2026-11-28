@@ -8,13 +8,13 @@ from __future__ import annotations
 import base64
 import binascii
 import re
-import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Final, Protocol
 from urllib.parse import unquote_to_bytes
 
 from mailferret.content.charset import decode_text
+from mailferret.content.invisible import strip_format
 from mailferret.content.truncate import Truncated, truncate_chars, truncate_utf8_bytes
 from mailferret.limits import Limits
 
@@ -29,16 +29,8 @@ _NAME_SPECIALS: Final = frozenset('()<>[]:;@\\,."')
 _WHITESPACE: Final = " \t\r\n"
 
 
-def _strip_format(text: str) -> tuple[str, bool]:
-    """Remove Cf characters (bidi controls, zero-width, BOM) that disguise displayed text."""
-    if text.isascii():
-        return text, False
-    kept = "".join(c for c in text if unicodedata.category(c) != "Cf")
-    return kept, len(kept) != len(text)
-
-
 def _clean(text: str) -> tuple[str, bool]:
-    return _strip_format(text.translate(_CONTROLS))
+    return strip_format(text.translate(_CONTROLS))
 
 
 def _header_text(raw: bytes | str, limits: Limits) -> tuple[str, bool]:
@@ -295,7 +287,7 @@ class FormattedAddress:
 
 def _address_part(raw: bytes | str, limits: Limits) -> Truncated:
     text, cut = _header_text(raw, limits)
-    text, removed = _strip_format(text)
+    text, removed = strip_format(text)
     text, rewritten = _ADDRESS_UNSAFE.subn("?", text)
     result = truncate_chars(text, limits.max_header_value_chars)
     return Truncated(result.text, result.truncated or cut, removed or rewritten > 0)
