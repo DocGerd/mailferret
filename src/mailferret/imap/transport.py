@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import imaplib
+import socket
 import ssl
 from pathlib import Path
 from typing import Any
@@ -12,11 +13,12 @@ from imapclient import IMAPClient  # type: ignore[import-untyped]
 from imapclient.exceptions import IMAPClientError  # type: ignore[import-untyped]
 from imapclient.imap4 import IMAP4WithTimeout  # type: ignore[import-untyped]
 from imapclient.imapclient import SocketTimeout  # type: ignore[import-untyped]
-from imapclient.tls import IMAP4_TLS  # type: ignore[import-untyped]
+from imapclient.tls import IMAP4_TLS, wrap_socket  # type: ignore[import-untyped]
 
 from mailferret.imap.capabilities import Capabilities, parse_capabilities
 from mailferret.imap.errors import ConnectError, HookBypassed, LimitBreach, ReadOnlyViolation
 from mailferret.imap.guard import GuardMixin, apply_line_cap
+from mailferret.imap.handle import ConnectHandle
 from mailferret.imap.logging_pin import pin_imapclient_logging
 from mailferret.imap.probe import NoProbe, PreTlsBytes, client_buffer
 from mailferret.imap.selfcheck import check_hooks, check_instance
@@ -28,17 +30,33 @@ from mailferret.limits import Limits
 class GuardedPlain(GuardMixin, IMAP4WithTimeout):  # type: ignore[misc]
     """Plain-socket IMAP4 (STARTTLS); the STARTTLS probe lives in the mixin."""
 
+    def _create_socket(self, timeout: float | None = None) -> socket.socket:
+        sock = socket.create_connection(
+            (self.host, self.port), timeout if timeout is not None else self._timeout
+        )
+        return self._publish(sock)
+
 
 class GuardedTLS(GuardMixin, IMAP4_TLS):  # type: ignore[misc]
     """Implicit-TLS IMAP4, which is not an ``IMAP4WithTimeout`` and needs the mixin too."""
+
+    def _create_socket(self, timeout: float | None = None) -> socket.socket:
+        sock = socket.create_connection(
+            (self.host, self.port), timeout=timeout if timeout is not None else self._timeout
+        )
+        self._publish(sock)
+        return wrap_socket(sock, self.ssl_context, self.host)  # type: ignore[no-any-return]
 
 
 class _Client(IMAPClient):  # type: ignore[misc]
     _plain_cls: type[GuardMixin] = GuardedPlain
     _tls_cls: type[GuardMixin] = GuardedTLS
 
-    def __init__(self, *args: Any, limits: Limits, **kwargs: Any) -> None:
+    def __init__(
+        self, *args: Any, limits: Limits, handle: ConnectHandle | None, **kwargs: Any
+    ) -> None:
         self._mf_limits = limits
+        self._mf_handle = handle
         super().__init__(*args, **kwargs)
 
     def _create_IMAP4(self) -> Any:
@@ -47,9 +65,16 @@ class _Client(IMAPClient):  # type: ignore[misc]
         connect_timeout = getattr(self._timeout, "connect", None)
         if self.ssl:
             return self._tls_cls(
-                self.host, self.port, self.ssl_context, connect_timeout, limits=self._mf_limits
+                self.host,
+                self.port,
+                self.ssl_context,
+                connect_timeout,
+                limits=self._mf_limits,
+                handle=self._mf_handle,
             )
-        return self._plain_cls(self.host, self.port, connect_timeout, limits=self._mf_limits)
+        return self._plain_cls(
+            self.host, self.port, connect_timeout, limits=self._mf_limits, handle=self._mf_handle
+        )
 
     def has_capability(self, capability: str | bytes) -> bool:
         """Hide ``LITERAL+`` so imapclient sends every literal synchronously (A§6)."""
@@ -91,12 +116,15 @@ def connect(
     *,
     limits: Limits,
     ca_file: Path | None = None,
+    handle: ConnectHandle | None = None,
 ) -> ReadOnlySession:
     """Open a verified TLS session or raise ``ConnectError``; no credential is ever sent.
 
     The returned session is unauthenticated and guarded: every hook has run, and the hook set,
     the logging pin and the timeouts were checked first. DNS resolution is not bounded by
-    ``L-11``; the caller's `L-13` deadline is the bound.
+    ``L-11``, and neither is the TCP connect to each address. From the TLS handshake on,
+    ``handle.shutdown()`` (the caller's `L-13` deadline) interrupts this call. A ``handle`` that
+    no socket was registered with means the ``_create_socket`` hook did not run.
     """
     check_hooks()
     pin_imapclient_logging()
@@ -116,7 +144,10 @@ def connect(
             ssl_context=ctx,
             timeout=timeout,
             limits=limits,
+            handle=handle,
         )
+        if handle is not None and not handle.registered:
+            raise HookBypassed("create_socket")
         imap = client._imap
         check_instance(imap, limits)
         starttls = mode is TlsMode.STARTTLS
