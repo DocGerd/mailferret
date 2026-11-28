@@ -327,12 +327,17 @@ def test_a_socket_that_never_reached_the_deadline_handle_aborts_the_connect(
         _no_login(server)
 
 
-def test_the_handle_refuses_a_socket_after_shutdown_and_releases_its_duplicate() -> None:
+def test_the_handle_shuts_down_the_registered_socket_and_refuses_one_after_shutdown() -> None:
     handle = ConnectHandle()
     first, peer = socket.socketpair()
+    other, other_peer = socket.socketpair()
+    handle.register(other)
     handle.register(first)
     handle.shutdown()
     assert peer.recv(1) == b""
+    other_peer.settimeout(0.2)
+    with pytest.raises(TimeoutError):
+        other_peer.recv(1)
     late, _ = socket.socketpair()
     with pytest.raises(DeadlineExceeded):
         handle.register(late)
@@ -340,3 +345,5 @@ def test_the_handle_refuses_a_socket_after_shutdown_and_releases_its_duplicate()
     first.close()
     peer.close()
     late.close()
+    other.close()
+    other_peer.close()

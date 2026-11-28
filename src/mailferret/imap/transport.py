@@ -6,6 +6,7 @@ import contextlib
 import imaplib
 import socket
 import ssl
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,7 @@ from imapclient import IMAPClient  # type: ignore[import-untyped]
 from imapclient.exceptions import IMAPClientError  # type: ignore[import-untyped]
 from imapclient.imap4 import IMAP4WithTimeout  # type: ignore[import-untyped]
 from imapclient.imapclient import SocketTimeout  # type: ignore[import-untyped]
-from imapclient.tls import IMAP4_TLS, wrap_socket  # type: ignore[import-untyped]
+from imapclient.tls import IMAP4_TLS, create_default_context  # type: ignore[import-untyped]
 
 from mailferret.imap.capabilities import Capabilities, parse_capabilities
 from mailferret.imap.errors import ConnectError, HookBypassed, LimitBreach, ReadOnlyViolation
@@ -44,8 +45,44 @@ class GuardedTLS(GuardMixin, IMAP4_TLS):  # type: ignore[misc]
         sock = socket.create_connection(
             (self.host, self.port), timeout=timeout if timeout is not None else self._timeout
         )
-        self._publish(sock)
-        return wrap_socket(sock, self.ssl_context, self.host)  # type: ignore[no-any-return]
+        ctx = self.ssl_context or create_default_context()
+        return _wrap_published(ctx, sock, self._publish, server_hostname=self.host)
+
+
+def _wrap_published(
+    ctx: ssl.SSLContext,
+    sock: socket.socket,
+    publish: Callable[[socket.socket], socket.socket],
+    **kwargs: Any,
+) -> socket.socket:
+    """Wrap, hand the TLS object to the `L-13` deadline, and only then run the handshake.
+
+    The wrap detaches the plain socket, so the deadline must hold the object the handshake
+    blocks on.
+    """
+    try:
+        tls = ctx.wrap_socket(sock, do_handshake_on_connect=False, **kwargs)
+    except BaseException:
+        sock.close()
+        raise
+    try:
+        publish(tls)
+        tls.do_handshake()
+    except BaseException:
+        tls.close()
+        raise
+    return tls
+
+
+class _PublishingContext:
+    """What imaplib's STARTTLS calls instead of the context: the same wrap, published first."""
+
+    def __init__(self, ctx: ssl.SSLContext, publish: Callable[[socket.socket], socket.socket]):
+        self._ctx = ctx
+        self._publish = publish
+
+    def wrap_socket(self, sock: socket.socket, **kwargs: Any) -> socket.socket:
+        return _wrap_published(self._ctx, sock, self._publish, **kwargs)
 
 
 class _Client(IMAPClient):  # type: ignore[misc]
@@ -101,7 +138,7 @@ def _starttls(client: Any, ctx: ssl.SSLContext) -> Capabilities:
     if not parse_capabilities(client.capabilities()).starttls:
         raise ConnectError("starttls_unavailable")
     try:
-        client.starttls(ctx)
+        client.starttls(_PublishingContext(ctx, imap._publish))
     except PreTlsBytes:
         raise ConnectError("pre_tls_bytes") from None
     except (imaplib.IMAP4.error, IMAPClientError):
