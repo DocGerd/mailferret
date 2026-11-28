@@ -596,3 +596,44 @@ def test_l02_cuts_the_encoded_input_before_transfer_decoding() -> None:
     result = decode_part(_part("base64"), encoded, limits=Limits(max_part_bytes=16))
     assert result.text == "a" * 12
     assert result.truncated
+
+
+@pytest.mark.parametrize("size", [0, 1, 5])
+def test_declared_size_never_shortens_the_partial_fetch(size: int) -> None:
+    tree = parse_bodystructure((b"text", b"plain", None, None, None, b"7bit", size, 1))
+    selection = select_body(tree)
+    assert selection.part is not None
+    assert selection.fetch_bytes == Limits().max_part_bytes
+    assert selection.notes == ()
+
+
+def test_html_is_not_char_capped_before_conversion() -> None:
+    html = PartInfo("1", "text/html", "7bit", None, 1, charset="utf-8")
+    limits = Limits(max_body_chars=10)
+    result = decode_part(html, b"<p>" + b"a" * 100 + b"</p>", limits=limits)
+    assert result.text is not None and len(result.text) == 107
+    assert not result.truncated
+    plain = decode_part(_part(), b"a" * 100, limits=limits)
+    assert plain.text == "a" * 10
+
+
+def test_content_id_follows_the_header_value_limit() -> None:
+    limits = Limits(max_header_value_chars=8)
+    cid = b"<" + b"x" * 50 + b"@example.com>"
+    leaf = (b"image", b"png", None, cid, None, b"base64", 1, None, None)
+    from_structure = parse_bodystructure(leaf, limits).parts[0].content_id
+    raw = b"Content-Type: image/png\r\nContent-ID: " + cid + b"\r\n\r\nx"
+    from_raw = walk_message(raw, limits).parts[0].content_id
+    assert from_structure is not None and len(from_structure) <= 8
+    assert from_raw is not None and len(from_raw) <= 8
+
+
+@pytest.mark.parametrize("raw_tuple", [False, True])
+def test_millions_of_children_are_not_materialised(raw_tuple: bool) -> None:
+    leaf = text_leaf()
+    kids = [leaf] * 3_000_000
+    structure = (*kids, b"mixed", None) if raw_tuple else multipart(kids)
+    tree: list[MimeTree] = []
+    peak = _peak(lambda: tree.append(parse_bodystructure(structure)))
+    assert ("limit_exceeded", "L-07") in _notes(tree[0])
+    assert peak < MIB

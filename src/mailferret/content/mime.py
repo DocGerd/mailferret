@@ -143,9 +143,9 @@ def _size(value: object) -> int | None:
     return None
 
 
-def _text(value: object) -> str | None:
+def _text(value: object, limits: Limits) -> str | None:
     if isinstance(value, bytes | str):
-        return decode_header_value(value).text
+        return decode_header_value(value, limits).text
     return None
 
 
@@ -214,7 +214,7 @@ def _leaf(
         charset=params.values.get("charset"),
         disposition=disposition,
         filename=filename or None,
-        content_id=_text(node[3]),
+        content_id=_text(node[3], limits),
     )
 
 
@@ -379,7 +379,7 @@ def _raw_leaf(
         charset=ctype.parameters.values.get("charset"),
         disposition=_token(dispo.value, "") or None,
         filename=filename or None,
-        content_id=_text(cid) if cid is not None else None,
+        content_id=_text(cid, limits) if cid is not None else None,
         span=body,
     )
 
@@ -460,8 +460,9 @@ def walk_message(raw: bytes, limits: Limits = _DEFAULT_LIMITS) -> MimeTree:
 def select_body(tree: MimeTree, limits: Limits = _DEFAULT_LIMITS) -> BodySelection:
     """Pick the text body: the first inline ``text/plain``, else the first inline ``text/html``.
 
-    ``fetch_bytes`` is the partial-fetch length: the declared size capped at ``max_part_bytes``
-    (L-02). A declared size over the cap adds an L-02 note; the cap is still enforced on read.
+    ``fetch_bytes`` is the partial-fetch length, always ``max_part_bytes`` (L-02): a declared
+    size is a hint and never shortens the fetch. A declared size over the cap adds an L-02 note;
+    the cap is enforced on read.
     """
     chosen: PartInfo | None = None
     for wanted in _BODY_TYPES:
@@ -476,7 +477,7 @@ def select_body(tree: MimeTree, limits: Limits = _DEFAULT_LIMITS) -> BodySelecti
     cap = limits.max_part_bytes
     if chosen.size is not None and chosen.size > cap:
         return BodySelection(chosen, cap, (Note("limit_exceeded", "L-02", chosen.section),))
-    return BodySelection(chosen, cap if chosen.size is None else chosen.size)
+    return BodySelection(chosen, cap)
 
 
 def list_attachments(
@@ -540,7 +541,8 @@ def decode_part(
     """Transfer-decode, charset-decode and cap one part's bytes.
 
     ``data`` is the part body as fetched. Input over ``max_part_bytes`` (L-02) is cut and the
-    result is truncated; output is capped at ``min(max_chars, max_body_chars)`` (L-03).
+    result is truncated; output is capped at ``min(max_chars, max_body_chars)`` (L-03), except
+    ``text/html``: its markup is converted first (A§3 step 7), so the caller truncates after that.
     """
     notes = _Notes()
     cut = len(data) > limits.max_part_bytes
@@ -557,15 +559,19 @@ def decode_part(
         notes.add("charset_fallback", part=part.section)
     if decoded.truncated:
         notes.add("limit_exceeded", "L-02", part.section)
-    cap = limits.max_body_chars if max_chars is None else min(max_chars, limits.max_body_chars)
-    text = truncate_chars(decoded.text, cap)
-    if text.truncated:
-        notes.add("limit_exceeded", "L-03", part.section)
+    text = decoded.text
+    text_cut = False
+    if part.content_type != "text/html":
+        cap = limits.max_body_chars if max_chars is None else min(max_chars, limits.max_body_chars)
+        capped = truncate_chars(text, cap)
+        text, text_cut = capped.text, capped.truncated
+        if text_cut:
+            notes.add("limit_exceeded", "L-03", part.section)
     return DecodedPart(
         part.section,
-        text.text,
+        text,
         decoded.charset,
-        cut or decoded.truncated or text.truncated,
+        cut or decoded.truncated or text_cut,
         tuple(notes.items),
     )
 
