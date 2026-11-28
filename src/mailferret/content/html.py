@@ -38,7 +38,13 @@ _MAX_ALT_CHARS: Final = 200
 _MAX_STYLE_RULES: Final = 5000
 _BUDGET_FACTOR: Final = 3  # blank runs shrink in _tidy; a worst case keeps one char in three
 _LINK_SCHEMES: Final = ("http://", "https://", "mailto:")
-_C0: Final = dict.fromkeys([*range(0x09), 0x0B, *range(0x0E, 0x20), 0x7F, 0xFFFE, 0xFFFF], " ")
+_MAX_VALUE_CHARS: Final = 256  # a CSS value longer than this is not a number or a colour
+_MAX_STYLE_CHARS: Final = 8192  # a longer inline style is treated as hidden (padding attack)
+# C0 and C1 controls other than tab, LF and CR (as headers._CONTROLS), plus noncharacters.
+_CONTROLS: Final = dict.fromkeys(
+    [0x00, *range(0x01, 0x09), 0x0B, 0x0C, *range(0x0E, 0x20), *range(0x7F, 0xA0), 0xFFFE, 0xFFFF],
+    " ",
+)
 
 # Skipped with their subtree and noted as script/style/head removal.
 _STRUCTURAL: Final = frozenset({"head", "script", "style", "title", "meta", "link", "base"})
@@ -80,9 +86,8 @@ _SPACES: Final = " \t\r\n\f\v" + "".join(
     map(chr, (0xA0, 0x1680, *range(0x2000, 0x200B), 0x2028, 0x2029, 0x202F, 0x205F, 0x3000))
 )
 _WHITESPACE: Final = re.compile(f"[{re.escape(_SPACES)}]+")
-_CSS_COMMENT: Final = re.compile(r"/\*.*?\*/", re.DOTALL)
 _CSS_ESCAPE: Final = re.compile(r"\\([0-9a-fA-F]{1,6})[ \t\n]?|\\(.)", re.DOTALL)
-_NUMBER: Final = re.compile(r"([+-]?(?:\d+\.?\d*|\.\d+))([a-z%]*)")
+_NUMBER: Final = re.compile(r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))([a-z%]*)")
 _SIMPLE_SELECTOR: Final = re.compile(r"([a-z][a-z0-9]*)?(?:([.#])([a-z_][\w-]*))?")
 _HEX_COLOR: Final = re.compile(r"#([0-9a-f]{3,8})")
 _RGB_COLOR: Final = re.compile(
@@ -115,9 +120,16 @@ class PlainText:
     notes: tuple[str, ...]
 
 
+def _clean(text: str) -> tuple[str, bool]:
+    """Replace control characters, then strip Cf and invisibles; report any change."""
+    spaced = text.translate(_CONTROLS)
+    kept, removed = strip_invisible(spaced)
+    return kept, removed or spaced != text
+
+
 def strip_body_text(text: str, limits: Limits = _DEFAULT_LIMITS) -> PlainText:
     """Clean a plain-text body: strip format controls and invisibles, then cap at L-03."""
-    cleaned, removed = strip_invisible(text)
+    cleaned, removed = _clean(text)
     cut = truncate_chars(cleaned, limits.max_body_chars)
     notes = ((NOTE_FORMAT,) if removed else ()) + ((NOTE_LIMIT_BODY,) if cut.truncated else ())
     return PlainText(cut.text, cut.truncated, notes)
@@ -134,8 +146,26 @@ def _unescape(match: re.Match[str]) -> str:
     return chr(code) if 0 < code <= 0x10FFFF and not 0xD800 <= code <= 0xDFFF else ""
 
 
+def _strip_comments(text: str) -> str:
+    """Replace CSS comments with a space in one pass; an unclosed comment drops the rest."""
+    parts: list[str] = []
+    index = 0
+    while True:
+        start = text.find("/*", index)
+        if start < 0:
+            parts.append(text[index:])
+            break
+        parts.append(text[index:start])
+        parts.append(" ")
+        end = text.find("*/", start + 2)
+        if end < 0:
+            break
+        index = end + 2
+    return "".join(parts)
+
+
 def _normalize_css(text: str) -> str:
-    return _CSS_ESCAPE.sub(_unescape, _CSS_COMMENT.sub(" ", text)).lower()
+    return _CSS_ESCAPE.sub(_unescape, _strip_comments(text)).lower()
 
 
 def _declarations(style: str) -> list[tuple[str, str]]:
@@ -145,12 +175,15 @@ def _declarations(style: str) -> list[tuple[str, str]]:
         if not sep:
             continue
         value = value.replace("!important", "").strip().strip("\"'").strip()
+        if len(value) > _MAX_VALUE_CHARS:
+            continue
         result.append((name.strip(), value))
     return result
 
 
 def _number(value: str) -> tuple[float, str] | None:
-    match = _NUMBER.fullmatch(value.strip())
+    value = value.strip()
+    match = _NUMBER.fullmatch(value) if len(value) <= _MAX_VALUE_CHARS else None
     if match is None:
         return None
     try:
@@ -171,6 +204,8 @@ def _channel(token: str) -> int | None:
 def _color(value: str) -> Color | str | None:
     """Return an RGB triple, ``"transparent"``, or ``None`` when the value is not understood."""
     value = value.strip()
+    if len(value) > _MAX_VALUE_CHARS:
+        return None
     if value == "transparent":
         return "transparent"
     if value in _NAMED_COLORS:
@@ -197,8 +232,27 @@ def _color(value: str) -> Color | str | None:
     return None
 
 
+def _tokens(value: str) -> list[str]:
+    """Split on whitespace outside parentheses in one pass."""
+    tokens: list[str] = []
+    depth = 0
+    start = 0
+    for index, char in enumerate(value):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(depth - 1, 0)
+        elif char.isspace() and depth == 0:
+            if index > start:
+                tokens.append(value[start:index])
+            start = index + 1
+    if start < len(value):
+        tokens.append(value[start:])
+    return tokens
+
+
 def _first_color(value: str) -> Color | str | None:
-    for token in re.split(r"\s+(?![^(]*\))", value):
+    for token in _tokens(value):
         found = _color(token)
         if found is not None:
             return found
@@ -462,7 +516,10 @@ def _classify(
     if tag in _STRUCTURAL:
         return True, False, bg
     attrs = el.attrib
-    decls = _declarations(attrs.get("style", "")) if "style" in attrs else []
+    style = attrs.get("style", "")
+    if len(style) > _MAX_STYLE_CHARS:
+        return False, True, bg
+    decls = _declarations(style) if style else []
     own_bg = _own_background(decls)
     if own_bg is None and "bgcolor" in attrs:
         own_bg = _first_color(_normalize_css(attrs.get("bgcolor", "")))
@@ -633,7 +690,7 @@ def html_to_text(
             source, cut = clipped.text, clipped.truncated
         if cut:
             notes.append(NOTE_LIMIT_PART)
-        source, removed = strip_invisible(source.translate(_C0))
+        source, removed = _clean(source)
         if removed:
             notes.append(NOTE_FORMAT)
         if "<!--" in source:
@@ -641,7 +698,7 @@ def html_to_text(
         text, counts, full = _extract(source, _BUDGET_FACTOR * limits.max_body_chars + 3)
     except Exception:  # lxml and libxml2 can fail outside their documented errors
         return HtmlText("", False, (*notes, NOTE_PARSE_FAILED))
-    text, late = strip_invisible(text)
+    text, late = _clean(text)
     if late and NOTE_FORMAT not in notes:
         notes.append(NOTE_FORMAT)
     if counts.hidden:

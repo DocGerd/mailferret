@@ -497,3 +497,75 @@ def test_fuzz_plain_body_stripping(text: str) -> None:
     result = strip_body_text(text, Limits(max_body_chars=100))
     assert len(result.text) <= 100
     assert not any(_is_format(c) for c in result.text)
+
+
+# --- controls and adversarial CSS ------------------------------------------------------------
+
+CONTROL_CHARS = [chr(c) for c in (*range(0x20), *range(0x7F, 0xA0)) if chr(c) not in "\t\n\r"]
+
+
+def test_controls_are_replaced_in_html_text() -> None:
+    esc = chr(0x1B)
+    raw = (
+        f"<p>a{esc}[31mred{chr(0x9B)}b{chr(0x85)}c{chr(0x07)}d</p>"
+        "<p>e&#x9b;f&#133;g&#27;h&#x7f;i</p>"
+    )
+    result = html_to_text(raw)
+    assert not set(result.text) & set(CONTROL_CHARS)
+    assert "a [31mred b c d" in result.text
+    assert NOTE_FORMAT in result.notes
+
+
+def test_controls_are_replaced_in_plain_bodies() -> None:
+    result = strip_body_text(f"line{chr(0x1B)}[2J\r\nnext{chr(0x9B)}x\tend")
+    assert result.text == "line [2J\r\nnext x\tend"
+    assert not set(result.text) & set(CONTROL_CHARS)
+    assert NOTE_FORMAT in result.notes
+    assert strip_body_text("a\tb\r\nc").notes == ()
+
+
+@pytest.mark.parametrize("char", CONTROL_CHARS)
+def test_each_control_is_replaced(char: str) -> None:
+    assert char not in _text(f"<p>x{char}y</p>")
+    assert char not in strip_body_text(f"x{char}y").text
+
+
+ADVERSARIAL_CSS = {
+    "unclosed_comments": "/*a" * 400_000,
+    "unclosed_comment_tail": "a:b;" * 100_000 + "/*a" * 200_000,
+    "star_runs": "/*" + "*" * 1_000_000,
+    "digits": "font-size:" + "1" * 1_000_000,
+    "dots": "font-size:" + "1." * 400_000 + "x",
+    "paren_runs": "color:rgb(" + "(" * 1_000_000,
+    "close_parens": "background:" + ") " * 400_000,
+    "spaces_in_parens": "background:#fff " + "( " * 300_000 + "red",
+    "rgb_digits": "color:rgb(" + "1," * 300_000 + ")",
+    "escapes": "color:" + "\\" * 500_000,
+    "semicolons": ";" * 1_000_000,
+    "colons": ":" * 1_000_000,
+}
+
+
+@pytest.mark.parametrize("name", sorted(ADVERSARIAL_CSS))
+def test_adversarial_css_is_linear(name: str) -> None:
+    css = ADVERSARIAL_CSS[name]
+    documents = (
+        f'<span style="{css}">{CANARY}</span>',
+        f"<style>.a{{{css}}}</style><p class=a>{CANARY}</p>",
+        f"<style>{css}</style>{CANARY}",
+    )
+    started = time.monotonic()
+    for document in documents:
+        html_to_text(document)
+    assert time.monotonic() - started < 1.0
+
+
+def test_unclosed_comment_hides_the_rest_of_the_declaration_list() -> None:
+    assert CANARY not in _text(f'<span style="display:none /*">{CANARY}</span>')
+    assert _text(f'<span style="color:red /*">{CANARY}</span>') == CANARY
+
+
+def test_oversized_inline_style_is_hidden_not_parsed() -> None:
+    padded = " " * 20_000 + "display:none"
+    assert CANARY not in _text(f'<span style="{padded}">{CANARY}</span>')
+    assert CANARY not in _text(f'<span style="{"a:b;" * 5000}display:none">{CANARY}</span>')
