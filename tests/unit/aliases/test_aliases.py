@@ -122,6 +122,34 @@ def test_malformed_siblings_do_not_hide_an_address(values: list[str]) -> None:
     assert found is not None and found.address == "shop@example.com"
 
 
+QUOTED_COMMAS = '"x, shop+t@example.com, y" <x@attacker.test>, ('
+
+
+def test_quoted_commas_do_not_forge_an_address() -> None:
+    for rules in (RULES, AliasRules.create([], "+")):
+        assert resolve_alias({"Delivered-To": [QUOTED_COMMAS]}, rules) is None
+
+
+def test_quoted_display_name_still_resolves_the_real_address() -> None:
+    value = '"x, shop+t@example.org, y" <real@example.com>, ('
+    found = resolve_alias({"To": [value]}, RULES)
+    assert found is not None and found.address == "real@example.com"
+
+
+def test_quoted_local_part_lookalike_never_yields_the_quoted_address() -> None:
+    value = '"evil@example.com, x" <real@example.org>, ('
+    rules = AliasRules.create(["example.com", "example.org"])
+    found = resolve_alias({"To": [value]}, rules)
+    assert found is not None and found.address == "real@example.org"
+
+
+def test_quoted_comma_display_name_resolves_before_cc() -> None:
+    headers = {"To": ['"Doe, John" <shop@example.com>, ('], "Cc": ["other@example.com"]}
+    found = resolve_alias(headers, RULES)
+    assert found is not None and found.address == "shop@example.com"
+    assert found.header == "To"
+
+
 def test_cut_value_never_completes_another_address() -> None:
     limits = Limits(max_header_value_chars=64)
     tail = "<evil+t@example.com"
