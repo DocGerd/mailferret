@@ -174,17 +174,14 @@ class ReadOnlySession:
         return isinstance(failure, ServerError) and failure.session_usable
 
     def _classify(self, exc: Exception, *, login: bool, sent: bool) -> SessionError:
-        completion = self._imap.last_completion
+        imap = self._imap
+        completion = imap.last_completion
         if self._expired:
             return DeadlineExceeded()
         if isinstance(exc, SessionError):
             return exc
         if isinstance(exc, TimeoutError):
             return SessionTimeout()
-        if isinstance(exc, imaplib.IMAP4.abort | IMAPClientAbortError):
-            return ConnectionDropped()
-        if isinstance(exc, OSError):
-            return ConnectionDropped()
         rejected = (
             sent
             and isinstance(exc, IMAPClientError | imaplib.IMAP4.error)
@@ -192,6 +189,14 @@ class ReadOnlySession:
         )
         if rejected and login:
             return LoginRejected()
-        if rejected and completion in ("NO", "BAD"):
+        if rejected:
             return CommandRejected("NO" if completion == "NO" else "BAD")
-        return ServerError(session_usable=isinstance(exc, ProtocolError) or not sent)
+        if imap.connection_lost or isinstance(exc, OSError):
+            return ConnectionDropped()
+        aborted = isinstance(exc, imaplib.IMAP4.abort | IMAPClientAbortError)
+        # Only a failure after the tagged completion was read leaves nothing of the response
+        # unread; before it, the rest of the response would be taken for the next command's.
+        kept = (not sent and not aborted) or (
+            isinstance(exc, ProtocolError) and completion is not None
+        )
+        return ServerError(session_usable=kept)
