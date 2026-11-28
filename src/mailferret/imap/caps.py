@@ -8,11 +8,11 @@ from typing import Final
 
 from mailferret.limits import Limits
 
-# What imaplib keeps for one untagged line in the worst case, a line of a type not seen yet:
-# the dict entry, its key, the list and the bytes object. Not a [limits] key: lowering it
-# would weaken the bound. tests/unit/imap/test_overhead.py measures it with tracemalloc on
-# every supported minor and fails if a minor keeps more.
-LINE_OVERHEAD_BYTES: Final = 256
+# Bytes charged per response line on top of its length: what imaplib keeps for one untagged line
+# of a new type (dict entry, key, list, bytes object), measured as a tracemalloc peak on every
+# supported minor, times a safety margin. Not a [limits] key: lowering it would weaken the bound.
+# tests/unit/imap/test_overhead.py holds the method and fails if a minor needs more.
+LINE_OVERHEAD_BYTES: Final = 336
 
 
 class LiteralItem(Enum):

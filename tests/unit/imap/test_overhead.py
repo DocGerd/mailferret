@@ -1,7 +1,10 @@
 """L-26 per-line overhead: measured with ``tracemalloc`` on every supported minor (T-08, A§2.2).
 
-The constant must be at least what imaplib keeps for one untagged line. The worst case is a
+Method: the peak traced bytes of one imaplib command that receives N untagged lines, less only
+the data bytes imaplib keeps (not the ``* `` prefix, not the CRLF), per line. The worst case is a
 line whose type is new, so every line adds a dict entry, its key, a list and the bytes object.
+The constant must cover the largest measurement times ``SAFETY_MARGIN``; the CI imap job runs
+this on every minor, so a minor that keeps more fails here.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from tests.support.imap_fake import FakeImapServer
 from tests.unit.imap.conftest import Opener
 
 LINES = 20_000
+SAFETY_MARGIN = 1.5
 
 
 def _type_name(i: int, width: int = 4) -> str:
@@ -32,21 +36,25 @@ def same_type_lines(count: int) -> bytes:
     return b"* OK x\r\n" * 0 + b"".join(b"* 1 EXISTS\r\n" for _ in range(count))
 
 
-def _retained_per_line(server: FakeImapServer, opener: Opener, payload: bytes, count: int) -> float:
-    server.on("NOOP", [payload, "{tag} OK done\r\n"])
+def _overhead_per_line(server: FakeImapServer, opener: Opener, payload: bytes, count: int) -> float:
+    """Peak traced bytes per line, less only the data bytes imaplib keeps (not ``* ``, not CRLF)."""
+    chunks = [payload[i : i + 4096] for i in range(0, len(payload), 4096)]
+    server.on("NOOP", [*chunks, "{tag} OK done\r\n"])
     session = opener(server)
     gc.collect()
     tracemalloc.start()
     try:
-        before = tracemalloc.get_traced_memory()[0]
-        session.noop()
-        gc.collect()
-        after = tracemalloc.get_traced_memory()[0]
+        baseline = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        session._imap.noop()  # imaplib's own: imapclient's noop parses every line too
+        peak = tracemalloc.get_traced_memory()[1] - baseline
     finally:
         tracemalloc.stop()
     entries = session._imap.untagged_responses
     assert sum(len(v) for v in entries.values()) >= count
-    return (after - before) / count
+    kept = sum(len(item) for v in entries.values() for item in v)
+    overhead = (peak - kept) / count
+    return overhead
 
 
 @pytest.mark.parametrize("count", [4_000, 11_000, 20_000, 45_000])
@@ -58,10 +66,9 @@ def test_distinct_type_lines_cost_less_than_the_constant(
     data: str,
 ) -> None:
     payload = distinct_type_lines(count, data)
-    per_line = _retained_per_line(server, opener, payload, count)
-    wire = len(payload) / count
-    assert per_line - wire <= LINE_OVERHEAD_BYTES, (
-        f"imaplib keeps {per_line:.0f} B for a {wire:.0f} B line: raise LINE_OVERHEAD_BYTES"
+    overhead = _overhead_per_line(server, opener, payload, count)
+    assert overhead * SAFETY_MARGIN <= LINE_OVERHEAD_BYTES, (
+        f"{overhead:.0f} B per line: raise LINE_OVERHEAD_BYTES"
     )
 
 
@@ -69,9 +76,7 @@ def test_same_type_lines_cost_less_than_the_constant(
     server: FakeImapServer, opener: Opener
 ) -> None:
     payload = same_type_lines(LINES)
-    per_line = _retained_per_line(server, opener, payload, LINES)
-    wire = len(payload) / LINES
-    assert per_line - wire <= LINE_OVERHEAD_BYTES
+    assert _overhead_per_line(server, opener, payload, LINES) * SAFETY_MARGIN <= LINE_OVERHEAD_BYTES
 
 
 def test_the_constant_is_not_so_large_that_default_fetches_fail() -> None:
