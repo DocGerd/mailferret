@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import signal
 import stat
 import sys
 import time
 import tracemalloc
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -332,36 +333,135 @@ def test_env_name_outside_the_allowlist_is_refused(tmp_path: Path) -> None:
         "--passphrase hunter2",
         "--passphrase=hunter2",
         "--passph=hunter2",
-        "--passphrase-file /x",
-        "--passphrase-fd 0",
         "--pinentry-mode=loopback",
+        "--pinentry-mode error",
+        "--pinentry-mode",
         "--status-fd=1",
-        "--status-file /x",
-        "--command-fd 0",
-        "--logger-file /x",
+        "--output /x",
+        "-o /x",
+        "--multifile",
+        "--log-file /x",
+        "--agent-program /x",
+        "--keyserver x",
+        "--auto-key-retrieve",
+        "--auto-key-locate x",
         "--options /x",
+        "--homedir /x",
+        "-q",
+        "--",
         "--quiet --passphrase x",
+        "--pinentry-mode=error --output=/x",
     ],
 )
-def test_gpg_opts_that_carry_a_secret_or_override_the_recipe_are_refused(
-    tmp_path: Path, opts: str
-) -> None:
+def test_gpg_opts_outside_the_allowlist_are_refused_before_spawn(tmp_path: Path, opts: str) -> None:
     bind(tmp_path)
     marker = tmp_path / "spawned"
-    b = backend(
-        tmp_path,
-        py(f"open({str(marker)!r}, 'w'); print('x')"),
-        env={"PASSWORD_STORE_GPG_OPTS": opts},
-    )
+    code = f"open({str(marker)!r}, 'w'); print('x')"
+    env = {"PASSWORD_STORE_GPG_OPTS": opts}
     with pytest.raises(CredentialBackendError):
-        b.get(KEY)
+        backend(tmp_path, py(code), env=env).get(KEY)
+    with pytest.raises(CredentialBackendError):
+        backend(tmp_path, py("print('x')"), py(code), env=env).set(KEY, Secret(SECRET))
     assert not marker.exists()
 
 
-def test_harmless_gpg_opts_are_accepted(tmp_path: Path) -> None:
+@pytest.mark.parametrize("opts", ["--pinentry-mode=error", "--quiet --no-tty", ""])
+def test_allowlisted_gpg_opts_are_accepted(tmp_path: Path, opts: str) -> None:
     bind(tmp_path)
-    b = backend(tmp_path, py("print('x')"), env={"PASSWORD_STORE_GPG_OPTS": "--quiet --no-tty"})
-    assert b.get(KEY).reveal() == "x"
+    store = tmp_path / "store"
+    get, set_ = store_commands(store)
+    b = backend(tmp_path, get, set_, env={"PASSWORD_STORE_GPG_OPTS": opts})
+    b.set(KEY, Secret(SECRET))
+    assert b.get(KEY).reveal() == SECRET
+
+
+@pytest.mark.parametrize("name", ["PASSWORD_STORE_GPG_OPTS", "PASSWORD_STORE_DIR", "GNUPGHOME"])
+@pytest.mark.parametrize("value", ["a\nb", "a\rb", "a\0b"])
+def test_control_characters_in_env_values_are_refused_before_spawn(
+    tmp_path: Path, name: str, value: str
+) -> None:
+    bind(tmp_path)
+    marker = tmp_path / "spawned"
+    with pytest.raises(CredentialBackendError):
+        backend(tmp_path, py(f"open({str(marker)!r}, 'w')"), env={name: value}).get(KEY)
+    assert not marker.exists()
+
+
+def test_refused_set_keeps_a_valid_binding(tmp_path: Path) -> None:
+    bind(tmp_path)
+    for set_argv, env in (
+        (["relative-tool"], None),
+        (py("print('x')"), {"LD_PRELOAD": "/x.so"}),
+        (py("print('x')"), {"PASSWORD_STORE_GPG_OPTS": "--passphrase x"}),
+    ):
+        b = backend(tmp_path, py("print('x')"), set_argv, env=env)
+        with pytest.raises(CredentialBackendError):
+            b.set(KEY, Secret(SECRET))
+        assert binding_path(tmp_path / "data", KEY).exists()
+
+
+def test_describe_is_secure_only_for_the_pass_recipe(tmp_path: Path) -> None:
+    assert not backend(tmp_path, py("print('x')")).describe().secure
+    if sys.platform != "win32":
+        assert backend(tmp_path, ["/usr/bin/pass", "show", "x"]).describe().secure
+
+
+SPECIAL = 'pa"ss\\w0rd'  # pii-check: ignore
+
+
+def _forms(login: str) -> list[str]:
+    import base64
+
+    quoted = SPECIAL.replace("\\", "\\\\").replace('"', '\\"')
+    blob = base64.b64encode(f"\0{login}\0{SPECIAL}".encode()).decode("ascii")
+    return [SPECIAL, quoted, blob]
+
+
+@pytest.fixture
+def clean_redaction() -> Iterator[None]:
+    from mailferret.logging import clear_secrets
+
+    clear_secrets()
+    yield
+    clear_secrets()
+
+
+@pytest.mark.usefixtures("clean_redaction")
+@pytest.mark.parametrize("via", ["get", "set"])
+def test_secret_forms_are_registered_for_redaction(tmp_path: Path, via: str) -> None:
+    from mailferret.logging import redact
+
+    bind(tmp_path)
+    store = tmp_path / "store"
+    get, set_ = store_commands(store)
+    b = backend(tmp_path, get, set_)
+    if via == "get":
+        store.write_text(SPECIAL)
+        assert redact(SPECIAL) == SPECIAL
+        b.get(KEY)
+    else:
+        b.set(KEY, Secret(SPECIAL))
+    for form in _forms(KEY.login):
+        assert redact(f"line {form} end") == "line *** end"
+
+
+@pytest.mark.usefixtures("clean_redaction")
+@pytest.mark.parametrize("code", [0, 7])
+def test_secret_on_stderr_never_reaches_logs_or_output(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    capfd: pytest.CaptureFixture[str],
+    code: int,
+) -> None:
+    bind(tmp_path)
+    script = f"import sys; sys.stderr.write({SECRET!r}); print({SECRET!r}); sys.exit({code})"
+    with caplog.at_level(logging.DEBUG):
+        try:
+            backend(tmp_path, py(script)).get(KEY)
+        except CredentialBackendError as exc:
+            assert SECRET not in str(exc) + repr(exc.args)
+    out = capfd.readouterr()
+    assert SECRET not in caplog.text + out.out + out.err
 
 
 def test_describe_names_only_the_executable(tmp_path: Path) -> None:

@@ -55,7 +55,8 @@ class Home:
     pass_: str
 
     def env(self, *, gpg2: bool = False, **extra: str) -> dict[str, str]:
-        path = f"{self.wrappers_dir(gpg2)}{os.pathsep}{os.environ['PATH']}"
+        rest = os.environ["PATH"] if gpg2 else self.path_without_gpg2()
+        path = f"{self.wrappers_dir(gpg2)}{os.pathsep}{rest}"
         env = {
             "PATH": path,
             "HOME": str(self.base / "home"),
@@ -65,6 +66,26 @@ class Home:
         }
         env.update(extra)
         return env
+
+    def path_without_gpg2(self) -> str:
+        """PATH as is, or a shim dir of every other executable when the system has a gpg2."""
+        if not shutil.which("gpg2"):
+            return os.environ["PATH"]
+        shim = self.base / "nogpg2"
+        if not shim.exists():
+            shim.mkdir()
+            for directory in os.environ["PATH"].split(os.pathsep):
+                if not os.path.isdir(directory):
+                    continue
+                for entry in os.scandir(directory):
+                    target = shim / entry.name
+                    if (
+                        entry.name != "gpg2"
+                        and not target.exists()
+                        and os.access(entry.path, os.X_OK)
+                    ):
+                        target.symlink_to(entry.path)
+        return str(shim)
 
     def wrappers_dir(self, gpg2: bool) -> Path:
         return self.wrappers / ("gpg2" if gpg2 else "gpg")
@@ -241,8 +262,6 @@ def test_set_get_and_locked_through_the_real_spawn_path(stored: Home) -> None:
 
 
 def test_plain_gpg_branch_warm_and_expired(stored: Home) -> None:
-    if shutil.which("gpg2"):
-        pytest.skip("gpg2 on PATH selects the other branch")
     home = stored
     backend(home, home.env()).set(KEY, Secret(SECRET))
     drive(home, lambda: backend(home, home.env()).get(KEY))
@@ -258,8 +277,6 @@ def test_gpg2_branch_warm_and_expired(stored: Home) -> None:
 
 
 def test_gpg_agent_info_branch_warm_and_expired(stored: Home) -> None:
-    if shutil.which("gpg2"):
-        pytest.skip("gpg2 on PATH selects the other branch")
     home = stored
     backend(home, home.env()).set(KEY, Secret(SECRET))
     env = home.env(GPG_AGENT_INFO=f"{home.gnupg}/S.gpg-agent:0:1")
@@ -282,3 +299,19 @@ def test_a_pass_that_cannot_decrypt_for_another_reason_is_an_error(stored: Home)
     with pytest.raises(CredentialBackendError) as info:
         backend(home, home.env()).get(KEY)
     assert not isinstance(info.value, CredentialLocked)
+
+
+def test_documented_config_env_runs_through_set_and_get(stored: Home) -> None:
+    home = stored
+    b = CommandBackend(
+        home.base / "data",
+        [home.pass_, "show", ENTRY],
+        [home.pass_, "insert", "--multiline", "--force", ENTRY],
+        env={"PASSWORD_STORE_GPG_OPTS": "--pinentry-mode=error"},
+        limits=LIMITS,
+        environ=home.env(),
+    )
+    home.agent_conf(600)
+    b.set(KEY, Secret(SECRET))
+    home.unlock()
+    assert b.get(KEY).reveal() == SECRET

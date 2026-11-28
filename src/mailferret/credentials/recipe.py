@@ -14,28 +14,9 @@ GPG_OPTS = "PASSWORD_STORE_GPG_OPTS"
 PINENTRY_UNAVAILABLE = 67108949
 NOT_IN_STORE = b"is not in the password store"
 
-# gpg accepts any unique abbreviation of a long option, so a token is refused when it is a
-# prefix of one of these.
-_DENIED_OPTIONS = (
-    "--passphrase",
-    "--passphrase-fd",
-    "--passphrase-file",
-    "--passphrase-repeat",
-    "--command-fd",
-    "--command-file",
-    "--status-fd",
-    "--status-file",
-    "--logger-fd",
-    "--logger-file",
-    "--attribute-fd",
-    "--attribute-file",
-    "--pinentry-mode",
-    "--override-session-key",
-    "--override-session-key-fd",
-    "--exec-path",
-    "--options",
-    "--homedir",
-)
+# Everything else is refused: gpg takes unique abbreviations and many options redirect output,
+# channels, the agent or the keyring, so only these exact tokens are known harmless.
+ALLOWED_OPTIONS = frozenset({"--pinentry-mode=error", "--quiet", "--no-tty"})
 
 
 def is_pass_recipe(argv: Sequence[str]) -> bool:
@@ -43,14 +24,7 @@ def is_pass_recipe(argv: Sequence[str]) -> bool:
 
 
 def gpg_opts_allowed(value: str) -> bool:
-    """Refuse options that carry a secret, redirect a channel or override the recipe."""
-    for token in value.split():
-        if not token.startswith("--"):
-            continue
-        option = token.split("=", 1)[0]
-        if len(option) > 2 and any(denied.startswith(option) for denied in _DENIED_OPTIONS):
-            return False
-    return True
+    return all(token in ALLOWED_OPTIONS for token in value.split())
 
 
 def pass_env(user_opts: str, status_fd: int) -> dict[str, str]:
