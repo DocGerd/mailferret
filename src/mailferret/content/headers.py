@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import binascii
 import re
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Final, Protocol
@@ -23,13 +24,20 @@ _CONTROLS: Final = dict.fromkeys([*range(0x20), *range(0x7F, 0xA0), 0x2028, 0x20
 _ENCODED_WORD: Final = re.compile(r"=\?([^?\s*]+)(?:\*[^?\s]*)?\?([bBqQ])\?([^?\s]*)\?=")
 _FOLD: Final = re.compile(r"\r?\n(?=[ \t])")
 _PARAM_NAME: Final = re.compile(rf"([^*\s]+?)(?:\*([0-9]{{1,{_MAX_INDEX_DIGITS}}}))?(\*)?")
-_ADDRESS_UNSAFE: Final = re.compile(r"[\s<>\"\x00-\x1f\x7f-\x9f]")
+_ADDRESS_UNSAFE: Final = re.compile(r"[\s<>\"@,;()\x00-\x1f\x7f-\x9f]")
 _NAME_SPECIALS: Final = frozenset('()<>[]:;@\\,."')
 _WHITESPACE: Final = " \t\r\n"
 
 
+def _strip_format(text: str) -> str:
+    """Remove Cf characters (bidi controls, zero-width, BOM) that disguise displayed text."""
+    if text.isascii():
+        return text
+    return "".join(c for c in text if unicodedata.category(c) != "Cf")
+
+
 def _clean(text: str) -> str:
-    return text.translate(_CONTROLS)
+    return _strip_format(text.translate(_CONTROLS))
 
 
 def _header_text(raw: bytes | str, limits: Limits) -> tuple[str, bool]:
@@ -259,7 +267,9 @@ class FormattedAddress:
 
 def _address_part(raw: bytes | str, limits: Limits) -> Truncated:
     text, cut = _header_text(raw, limits)
-    result = truncate_chars(_ADDRESS_UNSAFE.sub("?", text), limits.max_header_value_chars)
+    result = truncate_chars(
+        _ADDRESS_UNSAFE.sub("?", _strip_format(text)), limits.max_header_value_chars
+    )
     return Truncated(result.text, result.truncated or cut)
 
 
