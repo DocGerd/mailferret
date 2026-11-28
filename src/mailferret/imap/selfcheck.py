@@ -59,6 +59,8 @@ def check_hooks() -> None:
     _expect(IMAPClient, "has_capability", ("self", "capability"))
     _expect(IMAP4WithTimeout, "__init__", ("self", "address", "port", "timeout"))
     _expect(IMAP4_TLS, "__init__", ("self", "host", "port", "ssl_context", "timeout"))
+    _expect(IMAP4WithTimeout, "_create_socket", ("self", "timeout"))
+    _expect(IMAP4_TLS, "_create_socket", ("self", "timeout"))
     for cls in (IMAP4WithTimeout, IMAP4_TLS):
         if not issubclass(cls, imaplib.IMAP4):
             raise ConnectError("hook_unavailable")
