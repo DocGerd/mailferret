@@ -48,7 +48,9 @@ class _State:
     pending_literal: int | None = None
     expect_trailer: bool = False
     completion: str | None = None
+    finished: bytes = b""  # tag whose completion was read, still owed to _command_complete
     dead: bool = False
+    dropped: bool = False
 
 
 def tagre_of(imap: object) -> re.Pattern[bytes] | None:
@@ -83,6 +85,11 @@ class GuardMixin(imaplib.IMAP4):
     def last_completion(self) -> str | None:
         """The type (OK, NO, BAD) of the last tagged completion read for the armed tag."""
         return self._mf.completion
+
+    @property
+    def connection_lost(self) -> bool:
+        """The socket reached EOF or failed (never a timeout) during the armed command."""
+        return self._mf.dropped
 
     @property
     def commands_started(self) -> int:
@@ -126,6 +133,10 @@ class GuardMixin(imaplib.IMAP4):
         self._mf.dead = True
         raise HookBypassed(check)
 
+    def _lost(self, exc: OSError) -> None:
+        if not isinstance(exc, TimeoutError):
+            self._mf.dropped = True
+
     def _alive(self) -> None:
         if self._mf.dead:
             raise ReadOnlyViolation("session_discarded")
@@ -155,6 +166,8 @@ class GuardMixin(imaplib.IMAP4):
         s.pending_literal = None
         s.expect_trailer = False
         s.completion = None
+        s.finished = b""
+        s.dropped = False
         self.untagged_responses.clear()
         tag: bytes = super()._new_tag()  # type: ignore[misc]
         s.tag = tag
@@ -171,7 +184,11 @@ class GuardMixin(imaplib.IMAP4):
         except ReadOnlyViolation:
             self._mf.dead = True
             raise
-        super().send(data)
+        try:
+            super().send(data)
+        except OSError as exc:
+            self._lost(exc)
+            raise
 
     def _gate(self, data: bytes) -> None:
         s = self._mf
@@ -233,8 +250,13 @@ class GuardMixin(imaplib.IMAP4):
         if size > s.caps.literal_cap:
             self._breach("literal_over_cap", s.caps.limit)
         self._charge(size)
-        data: bytes = super().read(size)
+        try:
+            data: bytes = super().read(size)
+        except OSError as exc:
+            self._lost(exc)
+            raise
         if len(data) != size:
+            s.dropped = True
             raise self.abort("socket error: EOF")
         s.pending_literal = None
         s.expect_trailer = True
@@ -252,8 +274,14 @@ class GuardMixin(imaplib.IMAP4):
             if isinstance(exc, imaplib.IMAP4.abort):
                 raise
             overlong = True
+        except OSError as exc:
+            self._lost(exc)
+            raise
         if overlong:
             self._breach("line_over_limit", "L-20")
+        if not line:
+            s.dropped = True  # EOF: imaplib raises its abort one frame above this hook
+            return line
         s.lines_read += 1
         if len(line) > s.limits.max_line_bytes:
             self._breach("line_over_limit", "L-20")
@@ -272,6 +300,8 @@ class GuardMixin(imaplib.IMAP4):
             if tag not in s.vetted:
                 self._bypassed("unvetted_tag")
             if tag == s.tag:
+                s.vetted.discard(tag)
+                s.finished = tag
                 s.completion = match.group("type").decode("ascii", "replace")
                 s.phase = "closed"
         elif s.phase == "await" and text.startswith(b"+"):
@@ -284,12 +314,13 @@ class GuardMixin(imaplib.IMAP4):
     def _command_complete(self, name: str, tag: bytes) -> Any:
         self._alive()
         s = self._mf
-        if tag not in s.vetted:
+        if tag not in s.vetted and tag != s.finished:
             self._bypassed("unvetted_tag")
         try:
             result = super()._command_complete(name, tag)  # type: ignore[misc]
         finally:
             s.vetted.discard(tag)
+            s.finished = b""
         s.completions += 1
         if name == "STARTTLS" and result[0] == "OK":
             self.untagged_responses.clear()

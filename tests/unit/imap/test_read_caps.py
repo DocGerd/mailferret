@@ -22,7 +22,7 @@ from mailferret.imap.caps import default_caps, unclamped_total
 from mailferret.limits import KIB, LINE_OVERHEAD_BYTES, MIB, Limits
 from tests.support.imap_fake import FakeImapServer, Flood, Literal
 from tests.unit.imap.conftest import Opener
-from tests.unit.imap.support import arm, make_sink
+from tests.unit.imap.support import arm, line, make_sink
 
 OK = "{tag} OK done\r\n"
 # Worst measured ratio of peak traced bytes to the total (nested tokens), times a margin of 1.5.
@@ -331,3 +331,16 @@ def test_a_completion_for_an_unvetted_tag_aborts_in_command_complete() -> None:
         imap._command_complete("NOOP", tag)
     assert err.value.check == "unvetted_tag"
     assert imap.discarded
+
+
+def test_a_second_tagged_line_for_a_completed_tag_trips_the_wire() -> None:
+    """A completed tag leaves ``vetted`` as soon as its line is read, not only in the hook."""
+    imap = make_sink()
+    tag = arm(imap)
+    imap.incoming[:] = [tag + b" OK done\r\n", tag + b" OK again\r\n"]
+    imap.send(line(tag, b"NOOP\r\n"))
+    imap.readline()
+    assert tag not in imap._mf.vetted
+    with pytest.raises(HookBypassed) as err:
+        imap.readline()
+    assert err.value.check == "unvetted_tag"

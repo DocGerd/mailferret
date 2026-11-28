@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from mailferret.imap import (
+    CommandRejected,
     ConnectError,
     ConnectionDropped,
     DeadlineExceeded,
@@ -351,3 +352,66 @@ def test_a_drop_raised_from_the_authenticator_is_a_login_phase_failure_not_a_ret
     finally:
         pool.close()
     assert (server.connections, len(attempts)) == (1, 1)
+
+
+def test_a_tagged_bad_to_a_search_literal_is_a_rejection_not_a_drop(
+    tls_material: TlsMaterial, pool_for: Pool
+) -> None:
+    """The issue #7 shape: imapclient raises an abort when the tagged BAD replaces the ``+``."""
+    with FakeImapServer(
+        tls=tls_material, implicit_tls=True, capabilities=CAPS, literals=False
+    ) as server:
+        pool = pool_for(server)
+        with pytest.raises(CommandRejected) as err:
+            pool.call(lambda s: s.search(["TEXT", "café"], "UTF-8"))
+        assert err.value.completion == "BAD"
+        assert (server.connections, _logins(server)) == (1, 1)
+        pool.call(lambda s: s.noop())
+        assert (server.connections, _logins(server)) == (1, 1)
+
+
+def test_a_garbage_reply_is_a_server_error_never_a_reconnect(
+    server: FakeImapServer, pool_for: Pool
+) -> None:
+    server.on("NOOP", [b"garbage\r\n", OK], once=True)
+    pool = pool_for(server)
+    with pytest.raises(ServerError) as err:
+        pool.call(lambda s: s.noop())
+    assert not err.value.session_usable
+    assert (server.connections, _logins(server)) == (1, 1)
+    pool.call(lambda s: s.noop())
+    assert (server.connections, _logins(server)) == (2, 2)
+
+
+def test_a_connection_closed_between_calls_is_reopened_once(
+    server: FakeImapServer, pool_for: Pool
+) -> None:
+    server.on("NOOP", [OK, Close()], once=True)
+    pool = pool_for(server)
+    pool.call(lambda s: s.noop())
+    pool.call(lambda s: s.noop())
+    assert (server.connections, _logins(server)) == (2, 2)
+
+
+def test_a_partial_response_left_behind_is_not_attributed_to_the_next_command(
+    server: FakeImapServer, pool_for: Pool
+) -> None:
+    """imapclient can fail on a NOOP's untagged lines before it reads the tagged completion."""
+    server.on(
+        "NOOP",
+        [b"* 9 EXISTS (\r\n", b"* 2 FETCH (UID 2 FLAGS (\\Flagged))\r\n", OK],
+        once=True,
+    )
+    server.on("UID FETCH", [b"* 1 FETCH (UID 1 FLAGS (\\Seen))\r\n", OK])
+    pool = pool_for(server)
+    caps = fetch_caps(Limits(), None, 2)
+
+    def fetch(s: ReadOnlySession) -> Any:
+        s.examine("INBOX")
+        return s.fetch([1, 2], ["FLAGS"], caps=caps)
+
+    with pytest.raises(ServerError) as err:
+        pool.call(lambda s: s.noop())
+    assert not err.value.session_usable
+    assert pool._session is None
+    assert list(pool.call(fetch)) == [1]
