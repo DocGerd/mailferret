@@ -118,7 +118,7 @@ def test_an_unanswered_login_is_one_login_no_reconnect_and_a_time_box(make_rig: 
     assert (rig.server.connections, logins(rig.server)) == (1, 1)
 
 
-def test_the_time_box_ends_and_a_success_removes_the_marker(make_rig: Maker) -> None:
+def test_the_time_box_ends_and_a_success_leaves_nothing_in_force(make_rig: Maker) -> None:
     rig = make_rig()
     rig.server.on("LOGIN", [Close()], once=True)
     clock = Clock()
@@ -131,6 +131,7 @@ def test_the_time_box_ends_and_a_success_removes_the_marker(make_rig: Maker) -> 
     clock.now += 1
     pool.call(lambda s: s.noop())
     assert (rig.server.connections, logins(rig.server)) == (2, 2)
+    assert AuthMarkers(rig.data_dir, clock).blocked(key_for()) is None
     assert _marker_files(rig) == []
 
 

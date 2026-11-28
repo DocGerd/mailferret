@@ -68,7 +68,6 @@ class PasswordAuth:
         if not caps.auth_plain and not (login.isascii() and _atom(login)):
             raise AuthFailed("needs_plain", account.account_id)
         self._send(session, account, backend, caps)
-        self._markers.clear_indeterminate(account)
         session.refresh_capabilities()
 
     def _send(

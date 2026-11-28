@@ -1,9 +1,12 @@
 """Persistent auth-failed markers per ``<login>@<host>``, shared by every server process (T-16).
 
-``rejected``: an explicit server rejection; it stays until ``clear``. ``indeterminate``: a login
-that was sent and got no tagged answer; it blocks for ``PAUSE_SECONDS`` by the stamp inside the
-file. A marker that cannot be read counts as present. When it cannot be written either, the
-process keeps its own record, so it still never logs in twice.
+Two files per key, so no writer ever replaces or deletes the other kind: ``auth-failed-*`` holds
+an explicit server rejection and stays until ``clear``; ``auth-paused-*`` holds a login that was
+sent and got no tagged answer, and blocks for ``PAUSE_SECONDS`` by the stamp inside it. Nothing
+deletes a marker except ``clear``, so there is no read-then-delete to race. ``blocked`` reads
+both files and this process's own record and takes the strictest. A marker that cannot be read
+counts as a rejection. When a marker cannot be written, the process keeps it in memory, so it
+still never logs in twice.
 """
 
 from __future__ import annotations
@@ -25,11 +28,15 @@ PAUSE_SECONDS: Final = 300
 _MAX_BYTES: Final = 4096
 
 MarkerKind = Literal["rejected", "indeterminate"]
+_PREFIX: Final[dict[MarkerKind, str]] = {
+    "rejected": "auth-failed-",
+    "indeterminate": "auth-paused-",
+}
 
 
-def marker_path(data_dir: Path, key: EntryKey) -> Path:
+def marker_path(data_dir: Path, key: EntryKey, kind: MarkerKind = "rejected") -> Path:
     digest = hashlib.sha256(key.username.encode()).hexdigest()[:32]
-    return data_dir / f"auth-failed-{digest}.json"
+    return data_dir / f"{_PREFIX[kind]}{digest}.json"
 
 
 class AuthMarkers:
@@ -37,16 +44,19 @@ class AuthMarkers:
         self._dir = data_dir
         self._clock = clock
         self._lock = threading.Lock()
-        self._unwritten: dict[str, tuple[MarkerKind, float]] = {}
+        self._unwritten: dict[tuple[str, MarkerKind], float] = {}
 
     def blocked(self, key: EntryKey) -> MarkerKind | None:
-        """The marker in force for ``key``, or ``None``."""
-        found = self._read(key)
-        if found is not None:
-            return self._in_force(*found)
+        """The strictest marker in force for ``key``, or ``None``."""
         with self._lock:
-            kept = self._unwritten.get(key.username)
-        return None if kept is None else self._in_force(*kept)
+            kept = {kind: self._unwritten.get((key.username, kind)) for kind in _PREFIX}
+        paused = self._paused(key)
+        if self._rejected(key) or kept["rejected"] is not None or paused is False:
+            return "rejected"
+        stamps = [at for at in (paused, kept["indeterminate"]) if at is not None]
+        if any(abs(self._clock() - at) < PAUSE_SECONDS for at in stamps):
+            return "indeterminate"
+        return None
 
     def record_rejected(self, key: EntryKey) -> None:
         self._record(key, "rejected")
@@ -55,53 +65,46 @@ class AuthMarkers:
         self._record(key, "indeterminate")
 
     def clear(self, key: EntryKey) -> None:
-        """For `auth set`, `setup` and `auth retry`; raises ``OSError`` if the file stays."""
+        """For `auth set`, `setup` and `auth retry`; raises ``OSError`` if a file stays."""
         with self._lock:
-            self._unwritten.pop(key.username, None)
-        marker_path(self._dir, key).unlink(missing_ok=True)
+            for kind in _PREFIX:
+                self._unwritten.pop((key.username, kind), None)
+        for kind in _PREFIX:
+            marker_path(self._dir, key, kind).unlink(missing_ok=True)
 
-    def clear_indeterminate(self, key: EntryKey) -> None:
-        """After a successful login: drops a time-boxed marker, never a rejection."""
-        found = self._read(key)
-        with self._lock:
-            kept = self._unwritten.get(key.username)
-            if kept is not None and kept[0] == "indeterminate":
-                del self._unwritten[key.username]
-        if found is not None and found[0] == "indeterminate":
-            with contextlib.suppress(OSError):
-                marker_path(self._dir, key).unlink(missing_ok=True)
-
-    def _in_force(self, kind: MarkerKind, at: float) -> MarkerKind | None:
-        if kind == "rejected":
-            return kind
-        return kind if abs(self._clock() - at) < PAUSE_SECONDS else None
-
-    def _read(self, key: EntryKey) -> tuple[MarkerKind, float] | None:
+    def _load(self, key: EntryKey, kind: MarkerKind) -> dict[str, object] | Literal[False] | None:
+        """The file's body, ``None`` if absent, ``False`` if it exists but cannot be trusted."""
         try:
-            with marker_path(self._dir, key).open("rb") as handle:
+            with marker_path(self._dir, key, kind).open("rb") as handle:
                 raw = handle.read(_MAX_BYTES + 1)
         except (FileNotFoundError, NotADirectoryError):
             return None
         except OSError:
-            return "rejected", 0.0
+            return False
         try:
             body = json.loads(raw) if len(raw) <= _MAX_BYTES else None
         except (ValueError, RecursionError):
-            body = None
+            return False
         if not isinstance(body, dict) or body.get("username") != key.username:
-            return "rejected", 0.0
+            return False
+        return body
+
+    def _rejected(self, key: EntryKey) -> bool:
+        return self._load(key, "rejected") is not None
+
+    def _paused(self, key: EntryKey) -> float | Literal[False] | None:
+        """The stamp, ``None`` if absent, ``False`` if the file cannot be trusted."""
+        body = self._load(key, "indeterminate")
+        if body is None or body is False:
+            return body
         at = body.get("at")
-        if (
-            body.get("kind") == "indeterminate"
-            and isinstance(at, int | float)
-            and not isinstance(at, bool)
-        ):
-            return "indeterminate", float(at)
-        return "rejected", 0.0
+        if isinstance(at, int | float) and not isinstance(at, bool):
+            return float(at)
+        return False
 
     def _record(self, key: EntryKey, kind: MarkerKind) -> None:
         now = self._clock()
-        path = marker_path(self._dir, key)
+        path = marker_path(self._dir, key, kind)
         tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
         payload = json.dumps({"username": key.username, "kind": kind, "at": now}).encode()
         try:
@@ -114,4 +117,4 @@ class AuthMarkers:
             with contextlib.suppress(OSError):
                 tmp.unlink()
             with self._lock:
-                self._unwritten[key.username] = (kind, now)
+                self._unwritten[(key.username, kind)] = now
