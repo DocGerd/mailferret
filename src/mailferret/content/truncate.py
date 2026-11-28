@@ -13,6 +13,7 @@ _MAX_SEQUENCE = 4
 class Truncated:
     text: str
     truncated: bool
+    stripped: bool = False
 
 
 def truncate_chars(text: str, max_chars: int) -> Truncated:

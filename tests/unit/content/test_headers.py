@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import base64
 import logging
 import time
 import tracemalloc
@@ -573,3 +574,90 @@ def test_formatted_addresses_are_single_unforgeable_and_free_of_format_controls(
 @given(st.text(alphabet=st.sampled_from([*NAMED_CF, "a", "=", "?", "\n", " "]), max_size=60))
 def test_header_values_never_contain_format_controls(text: str) -> None:
     assert not set(CF_CHARS) & set(decode_header_value(text).text)
+
+
+def test_codec_internal_error_never_escapes_any_header_entry_point() -> None:
+    bad = b"\x1b.J\x1bN\x88"
+    word = "=?iso-2022-jp-2?b?Gy5KG06I?="
+    assert base64.b64decode("Gy5KG06I") == bad
+    for text in (word, f"x {word} y"):
+        decode_header_value(text).text.encode("utf-8")
+        decode_header_value(text.encode()).text.encode("utf-8")
+    parsed = parse_header_parameters(f"attachment; filename*=iso-2022-jp-2''%1B.J%1BN%88; n={word}")
+    for value in parsed.parameters.values.values():
+        value.encode("utf-8")
+    decode_parameters([("filename*", "iso-2022-jp-2''%1B.J%1BN%88")]).values["filename"].encode()
+    result = format_address(_address(name=word.encode()))
+    assert result is not None
+    result.display.encode("utf-8")
+
+
+@FUZZ
+@given(st.text(alphabet=st.characters(categories=["Cs"]) | st.sampled_from("a=?"), max_size=40))
+def test_lone_surrogates_in_str_input_never_reach_the_output(text: str) -> None:
+    decode_header_value(text).text.encode("utf-8")
+    decode_parameters([(text or "x", text)]).values.get(text or "x", "").encode("utf-8")
+    for value in parse_header_parameters(f"a; b={text}").parameters.values.values():
+        value.encode("utf-8")
+    result = format_address(_address(name=text.encode("utf-8", "surrogatepass")))
+    assert result is not None
+    result.display.encode("utf-8")
+
+
+def test_str_input_is_bounded_in_bytes_not_only_chars() -> None:
+    limits = Limits(max_header_bytes=64)
+    result = decode_header_value("😀" * 64, limits)
+    assert result.truncated
+    assert len(result.text) <= 16
+    assert "�" not in result.text
+    assert decode_header_value("\ud800" * 3).text == "???"
+
+
+def test_l02_cut_inside_header_decoding_sets_truncated() -> None:
+    limits = Limits(max_part_bytes=16, max_header_bytes=64)
+    assert decode_header_value(b"a" * 40, limits).truncated
+    assert decode_header_value("a" * 40, limits).truncated
+    assert not decode_header_value(b"a" * 16, limits).truncated
+
+
+def test_whitespace_before_a_malformed_word_is_kept() -> None:
+    assert decode_header_value("=?utf-8?q?a?= =?utf-8?B?!!!?=").text == "a =?utf-8?B?!!!?="
+    assert decode_header_value("=?utf-8?B?!!!?= =?utf-8?q?a?=").text == "=?utf-8?B?!!!?= a"
+    assert decode_header_value("=?utf-8?q?a?= =?utf-8?q?b?=").text == "ab"
+
+
+def test_continuation_cut_survives_a_later_encoded_word_decode() -> None:
+    limits = Limits(max_header_bytes=64)
+    pairs = [("filename*0", "=?utf-8?q?a?="), ("filename*1", "b" * 60)]
+    result = decode_parameters(pairs, limits)
+    assert result.truncated
+    assert result.values["filename"].startswith("ab")
+
+
+def test_stripped_flag_reports_removed_format_controls() -> None:
+    assert decode_header_value("a‮b").stripped
+    assert not decode_header_value("ab\r\n c").stripped
+    assert decode_parameters([("filename", "a​b")]).stripped
+    assert decode_parameters([("filename*", "utf-8''a%E2%80%AEb")]).stripped
+    assert not decode_parameters([("filename", "ab")]).stripped
+    assert parse_header_parameters("attachment; filename=a​b").stripped
+    assert parse_header_parameters("a​b; x=1").stripped
+    assert not parse_header_parameters("attachment; filename=ab").stripped
+
+
+def test_stripped_flag_reports_rewritten_address_parts() -> None:
+    assert format_address(_address(name="Al‮ice".encode())).stripped  # type: ignore[union-attr]
+    assert format_address(_address(mailbox=b"ceo@example.com", host=b"evil.test")).stripped  # type: ignore[union-attr]
+    assert format_address(_address(mailbox=b"us\xe2\x80\x8ber")).stripped  # type: ignore[union-attr]
+    assert format_address(_address(host=b"example.com>")).stripped  # type: ignore[union-attr]
+    clean = format_address(_address(name=b"Alice"))
+    assert clean is not None
+    assert not clean.stripped
+
+
+def test_l02_cut_inside_parameter_assembly_sets_truncated() -> None:
+    limits = Limits(max_part_bytes=16, max_header_bytes=64)
+    pairs = [("filename*0*", "utf-8''" + "a" * 8), ("filename*1*", "a" * 14)]
+    result = decode_parameters(pairs, limits)
+    assert result.truncated
+    assert result.values["filename"] == "a" * 16
