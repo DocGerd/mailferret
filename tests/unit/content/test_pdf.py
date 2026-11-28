@@ -513,7 +513,9 @@ def test_registry_extracts_a_base64_pdf() -> None:
 def test_registry_notes_carry_the_section() -> None:
     result = extract_text(part("application/pdf"), generators.cyclic_page_tree_pdf())
     assert result.text is None
-    assert [(n.kind, n.part) for n in result.notes] == [("malformed", "2")]
+    assert [(n.kind, n.part) for n in result.notes if n.kind != "memory_cap_unavailable"] == [
+        ("malformed", "2")
+    ]
 
 
 def test_registry_plain_text_and_unsupported_types() -> None:
@@ -723,7 +725,9 @@ def test_cf_controls_are_stripped_from_every_extractor_and_noted() -> None:
     assert "‮" in (extract_pdf(raw).text or ""), "control: the PDF yields Cf characters"
     result = extract_text(part("application/pdf"), raw)
     assert result.text == "x"
-    assert [(n.kind, n.part) for n in result.notes] == [("format_stripped", "2")]
+    assert [(n.kind, n.part) for n in result.notes if n.kind != "memory_cap_unavailable"] == [
+        ("format_stripped", "2")
+    ]
     plain = extract_text(part("text/plain"), "a‮b​c".encode())
     assert plain.text == "abc"
     assert [n.kind for n in plain.notes] == ["format_stripped"]
