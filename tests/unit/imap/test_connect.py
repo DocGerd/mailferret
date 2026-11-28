@@ -222,14 +222,21 @@ def test_read_timeout_applies_to_the_starttls_reply(tls_material: TlsMaterial) -
     with FakeImapServer(tls=tls_material, greeting=greeting) as server:
         server.on("STARTTLS", [Stall()])
         start = time.monotonic()
-        with pytest.raises(ConnectError) as err:
-            connect(
-                HOST,
-                server.port,
-                TlsMode.STARTTLS,
-                ca_file=tls_material.cert_file,
-                limits=Limits(imap_connect_seconds=15, imap_read_seconds=1),
-            )
+        # Fails fast instead of hanging if the read timeout is removed: the server hangs up.
+        watchdog = threading.Timer(8.0, server.stop)
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            with pytest.raises(ConnectError) as err:
+                connect(
+                    HOST,
+                    server.port,
+                    TlsMode.STARTTLS,
+                    ca_file=tls_material.cert_file,
+                    limits=Limits(imap_connect_seconds=15, imap_read_seconds=1),
+                )
+        finally:
+            watchdog.cancel()
         assert err.value.code == "timeout"
         assert time.monotonic() - start < 10
         _no_credentials(server)

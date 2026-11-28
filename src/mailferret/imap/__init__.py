@@ -17,6 +17,7 @@ from mailferret.imap.errors import (
     SessionError,
     SessionTimeout,
 )
+from mailferret.imap.lifecycle import AccountSession
 from mailferret.imap.logging_pin import pin_imapclient_logging
 from mailferret.imap.session import ReadOnlySession
 from mailferret.imap.tls import TlsMode, build_context
@@ -25,6 +26,7 @@ from mailferret.imap.transport import connect
 pin_imapclient_logging()
 
 __all__ = [
+    "AccountSession",
     "Capabilities",
     "CommandCaps",
     "CommandRejected",
