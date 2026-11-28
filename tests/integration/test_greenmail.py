@@ -11,6 +11,7 @@ import pytest
 
 from mailferret.imap import ConnectError, TlsMode, build_context
 from mailferret.imap import connect as mf_connect
+from mailferret.limits import Limits
 from tests.fixtures.corpus import committed
 from tests.integration.conftest import (
     ACCOUNTS,
@@ -38,9 +39,11 @@ def test_ca_file_required_and_sufficient(greenmail: Greenmail) -> None:
     with pytest.raises(ssl.SSLCertVerificationError):
         connect(None)
     with pytest.raises(ConnectError) as err:
-        mf_connect(HOST, IMAPS_PORT, TlsMode.IMPLICIT)
+        mf_connect(HOST, IMAPS_PORT, TlsMode.IMPLICIT, limits=Limits())
     assert err.value.code == "tls_verify_failed"
-    mf_connect(HOST, IMAPS_PORT, TlsMode.IMPLICIT, ca_file=greenmail.ca_file).close()
+    mf_connect(
+        HOST, IMAPS_PORT, TlsMode.IMPLICIT, ca_file=greenmail.ca_file, limits=Limits()
+    ).close()
     conn = connect(greenmail.ca_file)
     try:
         assert conn.login(ALICE, ACCOUNTS[ALICE])[0] == "OK"
@@ -153,7 +156,7 @@ def test_plaintext_port_has_no_starttls_and_no_login_sent(
         return ACCOUNTS[account]
 
     def connect_then_fetch_secret() -> None:
-        mf_connect(HOST, IMAP_PORT, TlsMode.STARTTLS)
+        mf_connect(HOST, IMAP_PORT, TlsMode.STARTTLS, limits=Limits())
         backend_get(ALICE)
 
     with pytest.raises(ConnectError) as err:
