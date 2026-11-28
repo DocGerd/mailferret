@@ -41,6 +41,7 @@ class _State:
     tail: bytes = b""
     literal_left: int = 0
     budget: int = 0
+    line_budget: int = 0
     vetted: set[bytes] = field(default_factory=set)
     vetted_total: int = 0
     completions: int = 0
@@ -177,6 +178,7 @@ class GuardMixin(imaplib.IMAP4):
         s.tail = b""
         s.literal_left = 0
         s.budget = 0
+        s.line_budget = 0
         s.caps, s.next_caps = s.next_caps or default_caps(s.limits), None
         s.pending_literal = None
         s.expect_trailer = False
@@ -301,6 +303,9 @@ class GuardMixin(imaplib.IMAP4):
         if len(line) > s.limits.max_line_bytes:
             self._breach("line_over_limit", "L-20")
         self._charge(len(line) + LINE_OVERHEAD_BYTES)
+        s.line_budget += len(line) + LINE_OVERHEAD_BYTES
+        if s.line_budget > s.caps.line_total:
+            self._breach("response_over_line_total", "L-32")
         self._note_line(line[:-2] if line.endswith(b"\r\n") else line)
         return line
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from mailferret.limits import Limits
+from mailferret.limits import FETCH_LINE_ALLOWANCE_BYTES, LINE_OVERHEAD_BYTES, Limits
 
 
 class LiteralItem(Enum):
@@ -26,18 +26,34 @@ class LiteralItem(Enum):
 
 @dataclass(frozen=True)
 class CommandCaps:
+    """``total`` bounds every byte of the response (L-26); ``line_total`` its lines (L-32)."""
+
     literal_cap: int
     total: int
     limit: str
+    line_total: int
 
 
 def default_caps(limits: Limits) -> CommandCaps:
-    """For commands that fetch no message items (SEARCH, LIST, STATUS, ...): the whole `L-26`."""
+    """For commands that fetch no message items (SEARCH, LIST, STATUS, ...).
+
+    ``L-26`` for the whole response; lines up to ``L-32``, and no more than one `L-20` line
+    plus a folder-list's worth (`L-21`) of short ones.
+    """
     return CommandCaps(
         LiteralItem.HEADER.cap(limits),
         limits.max_command_response_bytes,
         LiteralItem.HEADER.limit_id,
+        min(
+            limits.max_response_line_bytes,
+            limits.max_line_bytes + limits.max_folders * (LINE_OVERHEAD_BYTES + 512),
+        ),
     )
+
+
+def line_allowance(limits: Limits, messages: int) -> int:
+    """``n x A + L-20``: the line bytes ``messages`` fetched messages may bring, unclamped."""
+    return messages * FETCH_LINE_ALLOWANCE_BYTES + limits.max_line_bytes
 
 
 def unclamped_total(limits: Limits, item: LiteralItem | None, messages: int) -> int:
@@ -59,6 +75,7 @@ def fetch_caps(limits: Limits, item: LiteralItem | None, messages: int) -> Comma
         literal.cap(limits),
         min(limits.max_command_response_bytes, unclamped_total(limits, item, messages)),
         literal.limit_id,
+        min(limits.max_response_line_bytes, line_allowance(limits, messages)),
     )
 
 
@@ -66,4 +83,8 @@ def max_messages(limits: Limits, item: LiteralItem | None) -> int:
     """The most messages one FETCH may cover with an unclamped total under `L-26`; 0 if none."""
     c = item.cap(limits) if item is not None else 0
     room = limits.max_command_response_bytes - limits.max_line_bytes
-    return max(0, room // (c + limits.max_line_bytes))
+    by_total = room // (c + limits.max_line_bytes)
+    by_lines = (
+        limits.max_response_line_bytes - limits.max_line_bytes
+    ) // FETCH_LINE_ALLOWANCE_BYTES
+    return max(0, min(by_total, by_lines))

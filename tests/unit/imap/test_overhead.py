@@ -15,6 +15,7 @@ import tracemalloc
 
 import pytest
 
+from mailferret.imap import CommandCaps
 from mailferret.limits import LINE_OVERHEAD_BYTES
 from tests.support.imap_fake import FakeImapServer
 from tests.unit.imap.conftest import Opener
@@ -24,6 +25,7 @@ LINES = 20_000
 # requires the measurement to stay under it with MIN_MARGIN, so a minor that keeps more fails.
 MIN_MARGIN = 1.5
 REPEATS = 3
+UNBOUNDED = CommandCaps(literal_cap=10**9, total=10**12, limit="L-05", line_total=10**12)
 
 
 def _type_name(i: int, width: int = 4) -> str:
@@ -53,6 +55,7 @@ def _overhead_per_line(server: FakeImapServer, opener: Opener, payload: bytes, c
             gc.collect()
             baseline = tracemalloc.get_traced_memory()[0]
             tracemalloc.reset_peak()
+            session._imap.arm_caps(UNBOUNDED)  # the overhead is measured, not capped
             session._imap.noop()  # imaplib's own: imapclient's noop parses every line too
             peaks.append(tracemalloc.get_traced_memory()[1] - baseline)
     finally:
