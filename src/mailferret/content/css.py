@@ -5,6 +5,12 @@ alternatives cannot overlap, and no value is skipped for being long. Only what h
 understood: ``display``, ``visibility``, ``opacity``, font size, text and background colour,
 clipping, off-screen positioning, plus single tag, class, id or ``tag.class`` rules from
 stylesheets. Everything else is ignored.
+
+Cascade: for the inherited properties an ``!important`` declaration beats a normal one from any
+origin, otherwise the later wins; ``display`` and the other subtree-hiding properties are an OR,
+so a conflict hides. An unquoted ``url(`` is one token (CSS Syntax 4.3.6); a quote inside it, or an
+unclosed comment, makes the caller treat the element as hidden. A background image with a known
+fallback colour is compared by that colour; with none the backdrop is unknown and text is kept.
 """
 
 from __future__ import annotations
@@ -18,7 +24,14 @@ Color = tuple[int, int, int]
 ColorValue = Color | str | None
 
 _ESCAPE: Final = re.compile(r"\\([0-9a-fA-F]{1,6})[ \t\n]?|\\(.)", re.DOTALL)
-_SKIPPED: Final = r"""\\.|"(?:[^"\\\n]|\\.)*"?|'(?:[^'\\\n]|\\.)*'?"""
+# An unquoted ``url(`` (the name may be escaped) runs to ``)``; quotes inside are not strings
+# (CSS Syntax 4.3.6). Without this a quote inside it would hide the declarations that follow.
+_URL: Final = (
+    r"(?:[uU]|\\0{0,4}[57]5[ \t\n]?)(?:[rR]|\\0{0,4}[57]2[ \t\n]?)"
+    r"(?:[lL]|\\0{0,4}[46][cC][ \t\n]?)\((?![ \t\r\n\f]*[\"'])(?:[^)\\]|\\.)*\)?"
+)
+_SKIPPED: Final = _URL + r"""|\\.|"(?:[^"\\\n]|\\.)*"?|'(?:[^'\\\n]|\\.)*'?"""
+_URL_BODY: Final = re.compile(r"url\((?![ \t\r\n\f]*[\"'])([^)]*)\)?")
 _COMMENT_SCAN: Final = re.compile(_SKIPPED + r"|/\*", re.DOTALL)
 _STRUCTURE: Final = re.compile(_SKIPPED + r"|[(){};]", re.DOTALL)
 _NUMBER: Final = re.compile(r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))([a-z%]*)")
@@ -42,30 +55,72 @@ _OFFSET_PROPERTIES: Final = frozenset(
 _SIZE_PROPERTIES: Final = frozenset({"height", "max-height", "width", "max-width"})
 _CLIPPING: Final = frozenset({"hidden", "clip"})
 
-Declarations = list[tuple[str, str]]
+Declarations = list[tuple[str, str, bool]]  # name, value, !important
+
+
+@dataclass(frozen=True, slots=True)
+class Props:
+    """Inherited properties of one importance level; ``None`` means not declared."""
+
+    tiny: bool | None = None  # the text is too small to read
+    invisible: bool | None = None  # visibility is hidden or collapse
+    color: ColorValue = None  # text colour
+    background: ColorValue = None  # the known (fallback) colour, never "transparent"
+    image: bool = False  # a background image or gradient
+
+    def merge(self, later: Props) -> Props:
+        return Props(
+            self.tiny if later.tiny is None else later.tiny,
+            self.invisible if later.invisible is None else later.invisible,
+            self.color if later.color is None else later.color,
+            self.background if later.background is None else later.background,
+            self.image or later.image,
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class Style:
-    """What the declarations say about visibility; ``None`` means not declared."""
+    """What declarations say about visibility; an important value beats a normal one.
+
+    ``hidden`` is an OR over every origin and importance, so a conflict hides rather than
+    shows. The inherited properties follow the cascade: important first, then the later one.
+    """
 
     hidden: bool = False  # the whole subtree is gone, whatever its children declare
-    tiny: bool | None = None  # inherited: the text is too small to read
-    invisible: bool | None = None  # inherited: visibility is hidden or collapse
-    color: ColorValue = None  # inherited text colour
-    background: ColorValue = None
+    normal: Props = Props()
+    important: Props = Props()
 
     def merge(self, later: Style) -> Style:
-        background = self.background if later.background is None else later.background
-        if "image" in (self.background, later.background):
-            background = "image"
         return Style(
             self.hidden or later.hidden,
-            self.tiny if later.tiny is None else later.tiny,
-            self.invisible if later.invisible is None else later.invisible,
-            self.color if later.color is None else later.color,
-            background,
+            self.normal.merge(later.normal),
+            self.important.merge(later.important),
         )
+
+    @property
+    def tiny(self) -> bool | None:
+        return self.normal.tiny if self.important.tiny is None else self.important.tiny
+
+    @property
+    def invisible(self) -> bool | None:
+        value = self.important.invisible
+        return self.normal.invisible if value is None else value
+
+    @property
+    def color(self) -> ColorValue:
+        return self.normal.color if self.important.color is None else self.important.color
+
+    @property
+    def background(self) -> ColorValue:
+        """The fallback colour if one is known, else ``"image"`` for an image, else ``None``."""
+        known = (
+            self.normal.background
+            if self.important.background is None
+            else self.important.background
+        )
+        if known is None and (self.normal.image or self.important.image):
+            return "image"
+        return known
 
 
 def _unescape_match(match: re.Match[str]) -> str:
@@ -105,18 +160,29 @@ def strip_comments(text: str) -> tuple[str, bool]:
     return "".join(parts), False
 
 
-def _strip_important(value: str) -> str:
+def _split_important(value: str) -> tuple[str, bool]:
     stripped = value.rstrip()
     if stripped.endswith("important"):
         head = stripped[: -len("important")].rstrip()
         if head.endswith("!"):
-            return head[:-1].rstrip()
-    return stripped
+            return head[:-1].rstrip(), True
+    return stripped, False
+
+
+def _quote_in_url(text: str) -> bool:
+    """Whether an unquoted ``url(`` holds a quote: browsers read it as a bad url, others may not."""
+    unescaped = _ESCAPE.sub(_unescape_match, text).lower()
+    return any('"' in m.group(1) or "'" in m.group(1) for m in _URL_BODY.finditer(unescaped))
 
 
 def parse_declarations(text: str) -> tuple[Declarations, bool]:
-    """Split a declaration list; the flag reports an unclosed comment."""
+    """Split a declaration list; the flag asks the caller to fail closed.
+
+    It is set for an unclosed comment and for a quote inside an unquoted ``url(``, which parsers
+    disagree about.
+    """
     text, unclosed = strip_comments(text)
+    unsafe = unclosed or _quote_in_url(text)
     parts: list[str] = []
     depth = start = 0
     for match in _STRUCTURE.finditer(text):
@@ -133,8 +199,9 @@ def parse_declarations(text: str) -> tuple[Declarations, bool]:
     for part in parts:
         name, sep, value = part.partition(":")
         if sep:
-            result.append((normalize(name), _strip_important(normalize(value))))
-    return result, unclosed
+            cleaned, important = _split_important(normalize(value))
+            result.append((normalize(name), cleaned, important))
+    return result, unsafe
 
 
 # --- values ----------------------------------------------------------------------------------
@@ -264,23 +331,14 @@ def _background(name: str, value: str) -> tuple[bool, ColorValue]:
     return image, None if found == "transparent" else found
 
 
-def evaluate(declarations: Declarations) -> Style:
-    """Reduce declarations to a ``Style``; later declarations of an inherited property win."""
-    hidden = False
+def _props(declarations: Declarations) -> Props:
     tiny: bool | None = None
     invisible: bool | None = None
     color: ColorValue = None
     background: ColorValue = None
-    image = clipped = zero_size = False
-    for name, value in declarations:
-        if _hides(name, value):
-            hidden = True
-        elif name in ("overflow", "overflow-x", "overflow-y"):
-            clipped = clipped or any(word in _CLIPPING for word in value.split())
-        elif name in _SIZE_PROPERTIES:
-            number = _number(value)
-            zero_size = zero_size or (number is not None and number[0] <= 0)
-        elif name == "visibility" and value:
+    image = False
+    for name, value, _ in declarations:
+        if name == "visibility" and value:
             invisible = value in ("hidden", "collapse")
         elif name in ("font-size", "font"):
             size = _font_size(value) if name == "font-size" else _shorthand_size(value)
@@ -291,9 +349,25 @@ def evaluate(declarations: Declarations) -> Style:
             has_image, found = _background(name, value)
             image = image or has_image
             background = found or background
-    if clipped and zero_size:
-        hidden = True
-    return Style(hidden, tiny, invisible, color, "image" if image else background)
+    return Props(tiny, invisible, color, background, image)
+
+
+def evaluate(declarations: Declarations) -> Style:
+    """Reduce declarations to a ``Style``; later declarations of a property win per importance."""
+    hidden = clipped = zero_size = False
+    for name, value, _ in declarations:
+        if _hides(name, value):
+            hidden = True
+        elif name in ("overflow", "overflow-x", "overflow-y"):
+            clipped = clipped or any(word in _CLIPPING for word in value.split())
+        elif name in _SIZE_PROPERTIES:
+            number = _number(value)
+            zero_size = zero_size or (number is not None and number[0] <= 0)
+    return Style(
+        hidden or (clipped and zero_size),
+        _props([d for d in declarations if not d[2]]),
+        _props([d for d in declarations if d[2]]),
+    )
 
 
 # --- stylesheets -----------------------------------------------------------------------------
@@ -386,6 +460,7 @@ def parse_stylesheet(css: str) -> Sheet:
 __all__ = [
     "Color",
     "ColorValue",
+    "Props",
     "Sheet",
     "Style",
     "evaluate",

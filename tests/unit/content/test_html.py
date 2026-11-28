@@ -128,6 +128,65 @@ HIDDEN_VECTORS = {
     "hidden_after_filler_rules": (
         "<style>" + ".f{{color:red}}" * 6000 + ".h{{display:none}}</style><b class=h>{c}</b>"
     ),
+    "url_quote_sheet": (
+        '<style>.x{{background:url(a"b)}}.h{{display:none}}.y{{background:url(c"d)}}</style>'
+        "<b class=h>{c}</b>"
+    ),
+    "url_quote_same_rule": (
+        '<style>.h{{background:url(a"b);display:none;background:url(c"d)}}</style>'
+        "<b class=h>{c}</b>"
+    ),
+    "url_quote_single_sheet": (
+        "<style>.h{{background:url(a'b);display:none;background:url(c'd)}}</style>"
+        "<b class=h>{c}</b>"
+    ),
+    "url_escaped_name_sheet": (
+        '<style>.h{{background:\\75rl(a"b);display:none;x:\\75 rl(c"d)}}</style><b class=h>{c}</b>'
+    ),
+    "url_comment_in_body": (
+        "<style>.h{{background:url(a/*);display:none;b:c*/d)}}</style><b class=h>{c}</b>"
+    ),
+    "url_quote_inline": (
+        "<span style='background:url(a\"b);display:none;background:url(c\"d)'>{c}</span>"
+    ),
+    "url_quote_inline_no_hide": "<span style='background:url(a\"b)'>{c}</span>",
+    "important_sheet_beats_inline_size": (
+        "<style>.h{{font-size:0 !important}}</style><b class=h style='font-size:13px'>{c}</b>"
+    ),
+    "important_sheet_beats_inline_visibility": (
+        "<style>.h{{visibility:hidden !important}}</style>"
+        "<b class=h style='visibility:visible'>{c}</b>"
+    ),
+    "important_sheet_beats_inline_color": (
+        "<style>.h{{color:#fff !important}}</style><b class=h style='color:#000'>{c}</b>"
+    ),
+    "important_sheet_display_vs_inline": (
+        "<style>.h{{display:none !important}}</style><b class=h style='display:block'>{c}</b>"
+    ),
+    "important_inline_display_vs_sheet": (
+        "<style>.h{{display:block !important}}</style><b class=h style='display:none'>{c}</b>"
+    ),
+    "important_earlier_in_list": '<span style="font-size:0 !important;font-size:13px">{c}</span>',
+    "important_inherited_by_child": (
+        "<style>.h{{font-size:0 !important}}</style>"
+        "<div class=h><b style='font-size:0'>{c}</b></div>"
+    ),
+    "fallback_color_with_image": (
+        '<span style="background:#fff url(x.png) no-repeat;color:#fff">{c}</span>'
+    ),
+    "fallback_color_with_gradient": (
+        '<span style="background:linear-gradient(#000,#111) #fff;color:#fff">{c}</span>'
+    ),
+    "fallback_background_color_and_image": (
+        '<span style="background-image:url(x.png);background-color:#fff;color:#fff">{c}</span>'
+    ),
+    "fallback_on_parent": (
+        '<div style="background:#fff url(x.png)"><span style="color:#fff">{c}</span></div>'
+    ),
+    "fallback_from_sheet": (
+        "<style>.h{{background:url(x.png)}}</style>"
+        "<span class=h style='background-color:#fff;color:#fff'>{c}</span>"
+    ),
     "color_on_parent_bg": (
         '<div style="background:#123456"><span style="color:#123456">{c}</span></div>'
     ),
@@ -164,6 +223,19 @@ def test_hidden_vector_is_removed(name: str) -> None:
         '<table bgcolor="#000"><tr><td><font color="#fff">{c}</font></td></tr></table>',
         "<dialog open>{c}</dialog>",
         "<style>.f{{color:red}}</style><b class='f'>{c}</b>",
+        "<span style=\"background:url('a;b.png');color:red\">{c}</span>",
+        "<span style=\"background:url( 'x.png' );color:red\">{c}</span>",
+        "<style>.h{{background:url(a.png)}}.k{{display:none}}</style><b class=h>{c}</b>",
+        "<style>.h{{font-size:0}}</style><b class=h style='font-size:13px !important'>{c}</b>",
+        "<style>.h{{font-size:0 !important}}</style>"
+        "<b class=h style='font-size:13px !important'>{c}</b>",
+        "<style>.h{{color:#fff}}</style><b class=h style='color:#000 !important'>{c}</b>",
+        '<span style="font-size:0 !important;font-size:13px !important">{c}</span>',
+        '<span style="font-size:13px !important;font-size:0">{c}</span>',
+        '<span style="background:#000 url(x.png);color:#fff">{c}</span>',
+        '<span style="background:url(x.png) #000;color:#fff">{c}</span>',
+        "<style>.h{{background:#000 !important}}</style>"
+        "<b class=h style='background:#fff;color:#fff'>{c}</b>",
     ],
 )
 def test_visible_content_is_kept(visible: str) -> None:
@@ -600,6 +672,10 @@ ADVERSARIAL_CSS = {
     "escapes": "color:" + "\\" * 500_000,
     "semicolons": ";" * 1_000_000,
     "colons": ":" * 1_000_000,
+    "url_opens": "background:" + "url(" * 300_000,
+    "url_quotes": 'background:url(a"b);' * 60_000,
+    "url_escaped_names": "\\75rl(" * 150_000,
+    "important_runs": "color:red " + "! " * 400_000 + "important",
 }
 
 
@@ -622,6 +698,15 @@ def test_unclosed_comment_fails_closed() -> None:
         result = html_to_text(f'<span style="{style}">{CANARY}</span>')
         assert CANARY not in result.text
         assert NOTE_HIDDEN in result.notes
+
+
+def test_quote_inside_an_unquoted_url_fails_closed_inline() -> None:
+    result = html_to_text(f"<p>a</p><span style='background:url(a\"b)'>{CANARY}</span>")
+    assert result.text == "a"
+    assert NOTE_HIDDEN in result.notes
+    quoted = html_to_text(f"<span style='background:url(\"a.png\")'>{CANARY}</span>")
+    assert quoted.text == CANARY
+    assert NOTE_HIDDEN not in quoted.notes
 
 
 def test_unclosed_comment_in_a_stylesheet_ends_the_sheet_like_a_browser() -> None:

@@ -22,6 +22,7 @@ from lxml import etree
 from mailferret.content.charset import decode_text
 from mailferret.content.css import (
     ColorValue,
+    Props,
     Sheet,
     Style,
     evaluate,
@@ -288,7 +289,7 @@ def _attribute_style(el: Any) -> Style:
     color = None
     if el.tag == "font" and "color" in attrs:
         color = first_color(normalize(attrs.get("color", "")))
-    return Style(color=color, background=background)
+    return Style(normal=Props(color=color, background=background))
 
 
 def _classify(el: Any, walk: _Walk, inherited: _State) -> tuple[bool, bool, _State]:
