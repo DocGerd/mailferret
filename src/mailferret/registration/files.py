@@ -14,6 +14,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 _PRIVATE_MODE = 0o600
+_BACKUP_ATTEMPTS = 1000
 
 
 class RegistrationError(Exception):
@@ -65,8 +66,16 @@ def entry_state(config: dict[str, Any], name: str, entry: dict[str, Any]) -> Ent
 def backup_file(path: Path, *, now: datetime | None = None) -> Path:
     """Copy `path` to a timestamped sibling with mode 0600 (POSIX)."""
     stamp = (now or datetime.now(UTC)).strftime("%Y%m%dT%H%M%S%fZ")
-    target = path.with_name(f"{path.name}.{stamp}.bak")
-    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _PRIVATE_MODE)
+    for attempt in range(_BACKUP_ATTEMPTS):
+        suffix = f".{attempt}" if attempt else ""
+        target = path.with_name(f"{path.name}.{stamp}{suffix}.bak")
+        try:
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _PRIVATE_MODE)
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise FileExistsError(f"no free backup name for {path.name}")
     with path.open("rb") as src, os.fdopen(fd, "wb") as dst:
         shutil.copyfileobj(src, dst)
     if os.name == "posix":
