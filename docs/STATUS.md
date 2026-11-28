@@ -17,7 +17,6 @@ Phase: 2a done (scaffold F0, spikes V1–V4) and the architecture update that fo
 ## Open
 
 - Decisions left to their owning task:
-  - D3: whether a non-ASCII login, not only a non-ASCII secret, takes `AUTHENTICATE PLAIN` (V1 ran the secret only; A§2 `auth/` row, T-02, T-16); a time-boxed marker for an indeterminate auth outcome, so other processes do not log in again at once (T-16 residual risk until then). Every other site marks both as the default, pending D3.
   - F2: whether `register claude-code` still refuses unless `--force`, now that the reason is a duplicate server rather than shadowing (A§9.5); where the WSL launcher script goes, and what happens when no space-free absolute path exists (A§9.6).
   - P1: `--exclude-newer` as a second pin (A§9.2).
   - P3: whether P3 still needs D0 now that evals use MCP mocks (PLAN P3).
