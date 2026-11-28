@@ -238,6 +238,15 @@ INHERITED_HIDDEN_VECTORS = {
     "size_unitless": '<span style="font-size:0"><span style="font-size:12">{c}</span></span>',
     "size_garbage": '<span style="font-size:0"><span style="font-size:bogus">{c}</span></span>',
     "size_trailing_dot": '<span style="font-size:0"><b style="font-size:12.px">{c}</b></span>',
+    "font_shorthand_13px": '<span style="font-size:0"><b style="font:13px Arial">{c}</b></span>',
+    "font_shorthand_full": (
+        '<span style="font-size:0"><b style="font:italic bold 14px/1.5 a">{c}</b></span>'
+    ),
+    "font_shorthand_keyword": '<span style="font-size:0"><b style="font:large a">{c}</b></span>',
+    "font_shorthand_initial": '<span style="font-size:0"><b style="font:initial">{c}</b></span>',
+    "font_shorthand_spaced_line_height": (
+        '<span style="font-size:0"><b style="font:12px / 1.5 Arial">{c}</b></span>'
+    ),
     "font_no_family": '<span style="font-size:0"><b style="font:12px">{c}</b></span>',
     "font_keyword_no_family": '<span style="font-size:0"><b style="font:large">{c}</b></span>',
     "font_unknown_prefix": '<span style="font-size:0"><b style="font:bogus 12px a">{c}</b></span>',
@@ -300,14 +309,10 @@ def test_hidden_vector_is_removed(name: str) -> None:
         '<div style="visibility:hidden"><span style="visibility:visible">{c}</span></div>',
         '<div style="visibility:hidden"><span style="visibility:initial">{c}</span></div>',
         '<div style="font-size:0"><span style="font-size:large">{c}</span></div>',
+        '<div style="font-size:0"><span style="font-size:13px">{c}</span></div>',
         '<div style="font-size:0"><span style="font-size:12pt">{c}</span></div>',
         '<div style="font-size:0"><span style="font-size:0.2in">{c}</span></div>',
         '<div style="font-size:0"><span style="font-size:initial">{c}</span></div>',
-        '<div style="font-size:0"><span style="font:italic bold 14px/1.5 a">{c}</span></div>',
-        '<div style="font-size:0"><span style="font:large a">{c}</span></div>',
-        '<div style="font-size:0"><b style="font:small-caps 700 12px/1.5 A, serif">{c}</b></div>',
-        '<div style="font-size:0"><b style="font:12px / 1.5 Arial">{c}</b></div>',
-        '<div style="font-size:0"><b style="font:initial">{c}</b></div>',
         '<td style="font-size:0"><span style="font-size:12px;font-size:13px">{c}</span></td>',
         '<style>.a{{font-size:12px}}</style><div style="font-size:0"><b class=a>{c}</b></div>',
         '<td background="https://example.com/b.png" style="color:#fff">{c}</td>',
@@ -761,38 +766,23 @@ def _child(css: str, where: str) -> str:
     return f"<style>b{{{css}}}</style><b>{CANARY}</b>"
 
 
-# (template, a complete valid shorthand): only a valid one with an allowlisted size may clear.
-_FONT_SHAPES = [
-    ("{v} a", True),
-    ("italic 700 {v}/1.5 a", True),
-    ("small-caps {v} / 1.5 Arial, serif", True),
-    ("{v}/1.5 'A b'", True),
-    ("{v}", False),
-    ("{v} /1.5", False),
-    ("bogus {v} a", False),
-    ("{v} a 0", False),
-]
-
-
-def _oracle_font_clears(template: str, valid: bool, value: str) -> bool:
-    if template == "{v}":
-        return value == "initial"
-    return valid and value != "initial" and _oracle_size_clears(value)
+_font_tokens = st.one_of(
+    _size_values,
+    st.sampled_from(
+        ["italic", "bold", "700", "small-caps", "/", "/1.5", "1.5", "a", "Arial,", "initial"]
+    ),
+)
+_font_shorthands = st.lists(_font_tokens, min_size=1, max_size=6).map(" ".join)
 
 
 @FUZZ
-@given(_size_values, st.sampled_from(["inline", "sheet"]), st.sampled_from(_FONT_SHAPES))
-def test_fuzz_tiny_parent_only_a_valid_font_shorthand_clears(
-    value: str, where: str, shape: tuple[str, bool]
+@given(_font_shorthands, st.sampled_from(["inline", "sheet"]))
+def test_fuzz_tiny_parent_is_never_cleared_by_the_font_shorthand(
+    shorthand: str, where: str
 ) -> None:
-    template, valid = shape
-    css = "font:" + template.replace("{v}", value)
-    result = html_to_text(f'<div style="font-size:0">{_child(css, where)}</div>')
-    if _oracle_font_clears(template, valid, value):
-        assert result.text == CANARY
-    else:
-        assert result.text == ""
-        assert NOTE_HIDDEN in result.notes
+    result = html_to_text(f'<div style="font-size:0">{_child(f"font:{shorthand}", where)}</div>')
+    assert result.text == ""
+    assert NOTE_HIDDEN in result.notes
 
 
 @FUZZ

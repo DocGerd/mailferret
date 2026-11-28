@@ -16,7 +16,7 @@ agree; otherwise the backdrop is unknown and text is kept.
 
 Hiding states inherit through a ``Flag`` allowlist: only a recognised value (an absolute size above
 one point, a size keyword, ``visible``, ``initial``) clears an inherited state. Relative sizes,
-``inherit``, functions and garbage never do.
+``inherit``, functions, garbage and the whole ``font`` shorthand never do.
 """
 
 from __future__ import annotations
@@ -353,26 +353,6 @@ _SIZE_KEYWORDS: Final = frozenset(
 
 
 _STRICT_LENGTH: Final = re.compile(r"(?:\d+(?:\.\d+)?|\.\d+)[a-z]+")
-_FONT_PREFIX: Final = frozenset(
-    {
-        "normal",
-        "italic",
-        "oblique",
-        "small-caps",
-        "bold",
-        "bolder",
-        "lighter",
-        "ultra-condensed",
-        "extra-condensed",
-        "condensed",
-        "semi-condensed",
-        "semi-expanded",
-        "expanded",
-        "extra-expanded",
-        "ultra-expanded",
-    }
-)
-_FONT_PREFIX_VALUE: Final = re.compile(r"[1-9]\d{0,2}|1000|-?(?:\d+\.?\d*|\.\d+)deg")
 
 
 def _size_flag(value: str) -> Flag:
@@ -400,36 +380,20 @@ def _is_size(head: str) -> bool:
 
 
 def _shorthand_size(value: str) -> Flag | None:
-    """The size of a ``font`` shorthand; only a complete valid one may clear a tiny size.
+    """The ``font`` shorthand can set a tiny size but never clears an inherited one.
 
-    Valid is: optional style, variant, weight and stretch words, one size, an optional
-    ``/line-height``, then at least one family token (or ``initial`` alone). Whatever a browser
-    would drop inherits, and a tiny size token anywhere hides.
+    Validating the shorthand grammar (prefix words, line-height, family list) is a source of
+    fail-open gaps, so only the ``font-size`` longhand clears. Any tiny size token hides; the rest
+    inherits. A mail that resets its size with ``font:`` under a zero-size parent is over-hidden
+    and noted.
     """
     if not value:
         return None
-    if value == "initial":
-        return Flag.OFF
-    tokens = _tokens(value)
-    heads = [token.split("/", 1)[0] for token in tokens]
     tiny = any(
-        _is_size(head) and head != "initial" and _size_flag(head) is Flag.ON for head in heads
+        _is_size(head) and _size_flag(head) is Flag.ON
+        for head in (token.split("/", 1)[0] for token in _tokens(value))
     )
-    if tiny:
-        return Flag.ON
-    fallback = Flag.INHERIT
-    for index, head in enumerate(heads):
-        if head in _FONT_PREFIX or _FONT_PREFIX_VALUE.fullmatch(head):
-            continue
-        if head == "initial" or not _is_size(head):
-            return fallback
-        word, rest = tokens[index], tokens[index + 1 :]
-        if word.endswith("/") and word != "/":
-            rest = rest[1:]
-        elif "/" not in word and rest and rest[0].startswith("/"):
-            rest = rest[1:] if rest[0] != "/" else rest[2:]
-        return _size_flag(head) if rest else fallback
-    return fallback
+    return Flag.ON if tiny else Flag.INHERIT
 
 
 def _visibility(value: str) -> Flag:
