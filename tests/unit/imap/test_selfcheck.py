@@ -5,6 +5,7 @@ from __future__ import annotations
 import imaplib
 import logging
 import re
+import socket
 from collections.abc import Callable
 from typing import Any
 
@@ -13,8 +14,9 @@ from imapclient import IMAPClient
 from imapclient.imap4 import IMAP4WithTimeout
 from imapclient.tls import IMAP4_TLS
 
-from mailferret.imap import ConnectError, HookBypassed, TlsMode, connect
+from mailferret.imap import ConnectError, DeadlineExceeded, HookBypassed, TlsMode, connect
 from mailferret.imap.guard import GuardMixin
+from mailferret.imap.handle import ConnectHandle
 from mailferret.imap.logging_pin import logging_is_pinned, pin_imapclient_logging
 from mailferret.imap.selfcheck import check_hooks, check_instance
 from mailferret.imap.transport import GuardedPlain, GuardedTLS, _Client
@@ -86,6 +88,8 @@ def test_a_missing_maxline_refuses_to_connect(
         (IMAPClient, "has_capability"),
         (IMAP4WithTimeout, "__init__"),
         (IMAP4_TLS, "__init__"),
+        (IMAP4WithTimeout, "_create_socket"),
+        (IMAP4_TLS, "_create_socket"),
     ],
 )
 def test_a_missing_or_reshaped_imapclient_hook_refuses_to_connect(
@@ -186,6 +190,11 @@ class _RawSend:
 class _SkipComplete:
     def _command_complete(self, name: str, tag: bytes) -> Any:
         return imaplib.IMAP4._command_complete(self, name, tag)  # type: ignore[arg-type]
+
+
+class _NoPublish:
+    def _publish(self, sock: Any) -> Any:
+        return sock
 
 
 class _NoProbeStarttls:
@@ -297,3 +306,37 @@ def test_a_missing_or_reshaped_tagre_discards_the_session_at_the_next_line(
         imap.readline()
     assert err.value.check == "tagre"
     assert imap.discarded
+
+
+@pytest.mark.parametrize("mode", [TlsMode.IMPLICIT, TlsMode.STARTTLS])
+def test_a_socket_that_never_reached_the_deadline_handle_aborts_the_connect(
+    mode: TlsMode, tls_material: TlsMaterial, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stubbed(_NoPublish, monkeypatch)
+    with FakeImapServer(tls=tls_material, implicit_tls=mode is TlsMode.IMPLICIT) as server:
+        with pytest.raises(ConnectError) as err:
+            connect(
+                HOST,
+                server.port,
+                mode,
+                ca_file=tls_material.cert_file,
+                limits=Limits(),
+                handle=ConnectHandle(),
+            )
+        assert err.value.code == "hook_bypassed"
+        _no_login(server)
+
+
+def test_the_handle_refuses_a_socket_after_shutdown_and_releases_its_duplicate() -> None:
+    handle = ConnectHandle()
+    first, peer = socket.socketpair()
+    handle.register(first)
+    handle.shutdown()
+    assert peer.recv(1) == b""
+    late, _ = socket.socketpair()
+    with pytest.raises(DeadlineExceeded):
+        handle.register(late)
+    handle.release()
+    first.close()
+    peer.close()
+    late.close()

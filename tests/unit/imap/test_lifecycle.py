@@ -26,6 +26,7 @@ from mailferret.imap import (
     connect,
     fetch_caps,
 )
+from mailferret.imap.handle import ConnectHandle
 from mailferret.imap.lifecycle import AccountSession
 from mailferret.limits import Limits
 from tests.support.imap_fake import Close, FakeImapServer, Flood, Literal, Stall, TlsMaterial
@@ -55,13 +56,14 @@ def pool_for(tls_material: TlsMaterial) -> Iterator[Pool]:
     def make(server: FakeImapServer, limits: Limits | None = None) -> AccountSession:
         effective = limits or Limits()
 
-        def open_session() -> ReadOnlySession:
+        def open_session(handle: ConnectHandle) -> ReadOnlySession:
             return connect(
                 HOST,
                 server.port,
                 TlsMode.IMPLICIT,
                 ca_file=tls_material.cert_file,
                 limits=effective,
+                handle=handle,
             )
 
         pool = AccountSession(
@@ -73,6 +75,19 @@ def pool_for(tls_material: TlsMaterial) -> Iterator[Pool]:
     yield make
     for pool in pools:
         pool.close()
+
+
+def _pool(
+    port: int, tls_material: TlsMaterial, limits: Limits, mode: TlsMode = TlsMode.IMPLICIT
+) -> AccountSession:
+    pool = AccountSession(
+        lambda handle: connect(
+            HOST, port, mode, ca_file=tls_material.cert_file, limits=limits, handle=handle
+        ),
+        lambda s: s.login("user@example.com", "secret"),
+        limits,
+    )
+    return pool
 
 
 def _watchdog(pool: AccountSession, seconds: float = 8.0) -> threading.Timer:
@@ -234,19 +249,19 @@ def test_no_socket_is_opened_once_the_mark_is_set(server: FakeImapServer, pool_f
     assert server.connections == 0
 
 
-def test_the_mark_and_the_socket_open_share_one_lock(
+def test_expire_does_not_wait_for_a_connect_and_a_late_socket_carries_nothing(
     server: FakeImapServer, pool_for: Pool
 ) -> None:
-    """``expire`` cannot slip between the mark check and the connect."""
+    """The mark and the socket registration share one lock; ``expire`` never waits on a connect."""
     pool = pool_for(server)
     entered = threading.Event()
     release = threading.Event()
     real = pool._connect
 
-    def slow_connect() -> ReadOnlySession:
+    def slow_connect(handle: ConnectHandle) -> ReadOnlySession:
         entered.set()
         release.wait(5)
-        return real()
+        return real(handle)
 
     pool._connect = slow_connect  # type: ignore[method-assign]
     pool._begin()
@@ -261,16 +276,112 @@ def test_the_mark_and_the_socket_open_share_one_lock(
     worker = threading.Thread(target=acquire, daemon=True)
     worker.start()
     assert entered.wait(5)
-    expirer = threading.Thread(target=pool.expire, daemon=True)
-    expirer.start()
-    time.sleep(0.2)
-    assert expirer.is_alive()  # blocked on the same lock as the connect in progress
+    start = time.monotonic()
+    pool.expire()
+    assert time.monotonic() - start < 1
     release.set()
     worker.join(10)
-    expirer.join(10)
-    assert server.connections == 1
-    assert len(outcome) == 1  # the mark reached the published session
-    assert _logins(server) <= 1
+    assert len(outcome) == 1
+    assert pool._session is None
+    assert server.commands == []  # no handshake byte, no CAPABILITY, no LOGIN
+    assert server.wire == []
+
+
+def test_a_silent_server_is_cut_at_l13_not_at_l11(tls_material: TlsMaterial) -> None:
+    limits = Limits(tool_deadline_seconds=1)
+    assert limits.imap_connect_seconds > 5
+    with socket.create_server((HOST, 0)) as silent:
+        pool = _pool(silent.getsockname()[1], tls_material, limits)
+        start = time.monotonic()
+        with pytest.raises(DeadlineExceeded):
+            pool.call(lambda s: s.noop())
+        assert time.monotonic() - start < 4
+
+
+def test_a_server_dripping_the_greeting_is_cut_at_l13(tls_material: TlsMaterial) -> None:
+    """One byte per interval, each inside L-12: no per-read timeout ever fires."""
+    stop = threading.Event()
+    ctx = tls_material.server_context()
+
+    with socket.create_server((HOST, 0)) as listener:
+        port = listener.getsockname()[1]
+
+        def drip() -> None:
+            try:
+                conn, _ = listener.accept()
+                with ctx.wrap_socket(conn, server_side=True) as tls:
+                    while not stop.is_set():
+                        tls.sendall(b"*")
+                        stop.wait(0.2)
+            except OSError:
+                return
+
+        thread = threading.Thread(target=drip, daemon=True)
+        thread.start()
+        limits = Limits(tool_deadline_seconds=2, imap_read_seconds=1, imap_connect_seconds=1)
+        pool = _pool(port, tls_material, limits)
+        start = time.monotonic()
+        try:
+            with pytest.raises(DeadlineExceeded):
+                pool.call(lambda s: s.noop())
+        finally:
+            stop.set()
+        assert 1.5 < time.monotonic() - start < 6
+        thread.join(5)
+
+
+def test_a_stalled_starttls_handshake_is_cut_at_l13(tls_material: TlsMaterial) -> None:
+    """The handshake wraps and detaches the plain socket; the handle must still reach it."""
+    hold = threading.Event()
+    with FakeImapServer(tls=tls_material, capabilities=CAPS) as server:
+        server.starttls_hold = hold
+        pool = _pool(server.port, tls_material, Limits(tool_deadline_seconds=1), TlsMode.STARTTLS)
+        start = time.monotonic()
+        try:
+            with pytest.raises(DeadlineExceeded):
+                pool.call(lambda s: s.noop())
+        finally:
+            hold.set()
+        assert time.monotonic() - start < 4
+        assert _logins(server) == 0
+
+
+def test_a_dripping_response_is_cut_at_l13(server: FakeImapServer, pool_for: Pool) -> None:
+    class Drip:
+        def __iter__(self) -> Iterator[bytes]:
+            for _ in range(100):
+                yield b"*"
+                time.sleep(0.2)
+
+    server.on("NOOP", lambda cmd: Drip())  # type: ignore[arg-type, return-value]
+    limits = Limits(tool_deadline_seconds=2, imap_read_seconds=1)
+    pool = pool_for(server, limits)
+    start = time.monotonic()
+    with pytest.raises(DeadlineExceeded):
+        pool.call(lambda s: s.noop())
+    assert time.monotonic() - start < 5
+    assert (server.connections, _logins(server)) == (1, 1)
+
+
+def test_a_queued_call_never_runs_past_l13_in_total(server: FakeImapServer, pool_for: Pool) -> None:
+    server.on("NOOP", [Stall()], once=True)
+    limits = Limits(tool_deadline_seconds=2)
+    pool = pool_for(server, limits)
+    held = threading.Event()
+
+    def hold(s: ReadOnlySession) -> None:
+        held.set()
+        time.sleep(1.0)
+
+    first = threading.Thread(target=pool.call, args=(hold,), daemon=True)
+    first.start()
+    assert held.wait(10)
+    start = time.monotonic()
+    with pytest.raises(DeadlineExceeded):
+        pool.call(lambda s: s.noop())
+    elapsed = time.monotonic() - start
+    first.join(5)
+    assert elapsed < 2.6  # the queue wait counts: ~2 s from entry, not ~1 s + 2 s
 
 
 def test_calls_on_one_account_do_not_overlap(server: FakeImapServer, pool_for: Pool) -> None:
@@ -315,10 +426,15 @@ def test_an_l11_connect_timeout_is_one_attempt_and_no_login(
         limits = Limits(imap_connect_seconds=1)
         attempts: list[int] = []
 
-        def open_session() -> ReadOnlySession:
+        def open_session(handle: ConnectHandle) -> ReadOnlySession:
             attempts.append(1)
             return connect(
-                HOST, port, TlsMode.IMPLICIT, ca_file=tls_material.cert_file, limits=limits
+                HOST,
+                port,
+                TlsMode.IMPLICIT,
+                ca_file=tls_material.cert_file,
+                limits=limits,
+                handle=handle,
             )
 
         logins: list[int] = []
@@ -340,8 +456,13 @@ def test_a_drop_raised_from_the_authenticator_is_a_login_phase_failure_not_a_ret
 
     limits = Limits()
     pool = AccountSession(
-        lambda: connect(
-            HOST, server.port, TlsMode.IMPLICIT, ca_file=tls_material.cert_file, limits=limits
+        lambda handle: connect(
+            HOST,
+            server.port,
+            TlsMode.IMPLICIT,
+            ca_file=tls_material.cert_file,
+            limits=limits,
+            handle=handle,
         ),
         drop,
         limits,

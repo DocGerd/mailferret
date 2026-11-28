@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import imaplib
 import re
+import socket
 from dataclasses import dataclass, field
 from typing import Any, Final, NoReturn
 
@@ -22,6 +23,7 @@ from mailferret.imap.errors import (
     ReadOnlyViolation,
     ViolationReason,
 )
+from mailferret.imap.handle import ConnectHandle
 from mailferret.imap.probe import PreTlsBytes, bytes_pending
 from mailferret.limits import LINE_OVERHEAD_BYTES, Limits
 
@@ -69,8 +71,11 @@ def apply_line_cap(limits: Limits) -> None:
 class GuardMixin(imaplib.IMAP4):
     """Put in front of ``IMAP4WithTimeout`` and ``IMAP4_TLS``; needs ``limits=`` at construction."""
 
-    def __init__(self, *args: Any, limits: Limits, **kwargs: Any) -> None:
+    def __init__(
+        self, *args: Any, limits: Limits, handle: ConnectHandle | None = None, **kwargs: Any
+    ) -> None:
         self._mf = _State(limits=limits, caps=default_caps(limits))
+        self._handle = handle
         super().__init__(*args, **kwargs)
 
     @property
@@ -121,6 +126,16 @@ class GuardMixin(imaplib.IMAP4):
             self._bypassed("starttls_probe")
         if self.debug != 0:
             self._bypassed("debug")
+
+    def _publish(self, sock: socket.socket) -> socket.socket:
+        """Hand the fresh socket to the `L-13` deadline; it is closed unused if refused."""
+        if self._handle is not None:
+            try:
+                self._handle.register(sock)
+            except BaseException:
+                sock.close()
+                raise
+        return sock
 
     def _violate(self, reason: ViolationReason) -> NoReturn:
         raise ReadOnlyViolation(reason)
