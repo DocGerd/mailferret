@@ -15,7 +15,7 @@ import tracemalloc
 
 import pytest
 
-from mailferret.imap.caps import LINE_OVERHEAD_BYTES
+from mailferret.limits import LINE_OVERHEAD_BYTES
 from tests.support.imap_fake import FakeImapServer
 from tests.unit.imap.conftest import Opener
 

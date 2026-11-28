@@ -18,8 +18,8 @@ from mailferret.imap import (
     fetch_caps,
     max_messages,
 )
-from mailferret.imap.caps import LINE_OVERHEAD_BYTES, default_caps, unclamped_total
-from mailferret.limits import KIB, MIB, Limits
+from mailferret.imap.caps import default_caps, unclamped_total
+from mailferret.limits import KIB, LINE_OVERHEAD_BYTES, MIB, Limits
 from tests.support.imap_fake import FakeImapServer, Flood, Literal
 from tests.unit.imap.conftest import Opener
 from tests.unit.imap.support import arm, make_sink
