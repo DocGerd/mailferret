@@ -65,7 +65,11 @@ class CommandBackend:
         return minimal_env(environ, self._env, names=names)
 
     def _invoke(self, argv: Sequence[str], stdin_data: bytes | None) -> BoundedResult:
-        env = self._prepare(argv)
+        return self._run(argv, self._prepare(argv), stdin_data)
+
+    def _run(
+        self, argv: Sequence[str], env: dict[str, str], stdin_data: bytes | None
+    ) -> BoundedResult:
         use_recipe = recipe.is_pass_recipe(argv)
         user_opts = self._env.get(recipe.GPG_OPTS, "")
         result = run_bounded(
@@ -95,9 +99,10 @@ class CommandBackend:
             raise CredentialBackendUnavailable from None
         accepted = validate_new_secret(secret, self._limits.credential_command_output_bytes)
         register_secret(accepted.reveal(), key.login)
+        env = self._prepare(self._set_argv)
         # A failed or ambiguous write must leave no binding, so a later get finds nothing.
         remove_binding(self._data_dir, key)
-        self._invoke(self._set_argv, accepted.reveal().encode() + b"\n")
+        self._run(self._set_argv, env, accepted.reveal().encode() + b"\n")
         write_binding(self._data_dir, key)
 
     def delete(self, key: EntryKey) -> None:
@@ -105,7 +110,8 @@ class CommandBackend:
 
     def describe(self) -> BackendDescription:
         name = Path(self._get_argv[0]).name if self._get_argv else None
-        return BackendDescription(kind="command", backend=name, secure=True, status="configured")
+        secure = recipe.is_pass_recipe(self._get_argv)
+        return BackendDescription(kind="command", backend=name, secure=secure, status="configured")
 
 
 def _raise_for(result: BoundedResult, use_recipe: bool) -> None:
