@@ -5,6 +5,8 @@ from __future__ import annotations
 import socket
 import ssl
 import threading
+import time
+import traceback
 from collections.abc import Iterator
 from typing import Any
 
@@ -13,7 +15,7 @@ import pytest
 from mailferret.imap import ConnectError, TlsMode, connect
 from mailferret.imap.transport import _bytes_pending, _client_buffer, _NoProbe
 from mailferret.limits import Limits
-from tests.support.imap_fake import FakeImapServer, TlsMaterial
+from tests.support.imap_fake import FakeImapServer, Stall, TlsMaterial
 
 HOST = "127.0.0.1"
 
@@ -194,6 +196,7 @@ def test_tls_1_1_handshake_is_refused(tls_material: TlsMaterial) -> None:
 
 
 def test_connect_timeout_is_bounded_by_limits() -> None:
+    start = time.monotonic()
     with socket.create_server((HOST, 0)) as silent:
         port = silent.getsockname()[1]
         with pytest.raises(ConnectError) as err:
@@ -201,9 +204,62 @@ def test_connect_timeout_is_bounded_by_limits() -> None:
                 HOST,
                 port,
                 TlsMode.STARTTLS,
-                limits=Limits(imap_connect_seconds=1, imap_read_seconds=1),
+                limits=Limits(imap_connect_seconds=1, imap_read_seconds=30),
             )
     assert err.value.code == "timeout"
+    assert time.monotonic() - start < 10
+
+
+def test_read_timeout_applies_to_the_starttls_reply(tls_material: TlsMaterial) -> None:
+    greeting = b"* OK [CAPABILITY IMAP4rev1 STARTTLS] ready\r\n"
+    with FakeImapServer(tls=tls_material, greeting=greeting) as server:
+        server.on("STARTTLS", [Stall()])
+        start = time.monotonic()
+        with pytest.raises(ConnectError) as err:
+            connect(
+                HOST,
+                server.port,
+                TlsMode.STARTTLS,
+                ca_file=tls_material.cert_file,
+                limits=Limits(imap_connect_seconds=15, imap_read_seconds=1),
+            )
+        assert err.value.code == "timeout"
+        assert time.monotonic() - start < 10
+        _no_credentials(server)
+
+
+@pytest.mark.parametrize("mode", [TlsMode.STARTTLS, TlsMode.IMPLICIT])
+def test_hostile_8bit_capability_text_does_not_escape(
+    tls_material: TlsMaterial, mode: TlsMode
+) -> None:
+    hostile = b"* CAPABILITY IMAP4rev1 SECRETMARK \xff\r\n"
+    with FakeImapServer(
+        tls=tls_material, implicit_tls=mode is TlsMode.IMPLICIT, greeting=hostile
+    ) as server:
+        try:
+            connect(HOST, server.port, mode, ca_file=tls_material.cert_file)
+        except ConnectError as exc:
+            err = exc
+        else:  # pragma: no cover
+            pytest.fail("expected ConnectError")
+        rendered = "".join(traceback.format_exception(err)) + str(err) + repr(err)
+        assert "SECRETMARK" not in rendered
+        assert err.__context__ is None
+        assert err.__cause__ is None
+        _no_credentials(server)
+
+
+def test_missing_buffer_probe_fails_before_starttls_is_sent(
+    fake_imap_tls: FakeImapServer, tls_material: TlsMaterial, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_probe(_imap: Any) -> Any:
+        raise _NoProbe
+
+    monkeypatch.setattr("mailferret.imap.transport._client_buffer", no_probe)
+    with pytest.raises(ConnectError) as err:
+        connect(HOST, fake_imap_tls.port, TlsMode.STARTTLS, ca_file=tls_material.cert_file)
+    assert err.value.code == "hook_unavailable"
+    assert "STARTTLS" not in _verbs(fake_imap_tls)
 
 
 def test_connection_refused() -> None:

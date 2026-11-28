@@ -152,9 +152,12 @@ def test_plaintext_port_has_no_starttls_and_no_login_sent(
         gets.append(account)
         return ACCOUNTS[account]
 
-    with pytest.raises(ConnectError) as err:
+    def connect_then_fetch_secret() -> None:
         mf_connect(HOST, IMAP_PORT, TlsMode.STARTTLS)
         backend_get(ALICE)
+
+    with pytest.raises(ConnectError) as err:
+        connect_then_fetch_secret()
     assert err.value.code == "starttls_unavailable"
     wire = b"".join(sent)
     assert not re.search(rb"(?i)\bLOGIN\b|\bAUTHENTICATE\b", wire)
