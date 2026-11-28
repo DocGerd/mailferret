@@ -319,3 +319,13 @@ def test_caps_apply_to_one_command_only(server: FakeImapServer, opener: Opener) 
     other = _logged_in(server, opener)
     other.fetch([1], ["BODY.PEEK[HEADER]"], caps=fetch_caps(Limits(), LiteralItem.HEADER, 1))
     assert isinstance(other, ReadOnlySession)
+
+
+def test_a_completion_for_an_unvetted_tag_aborts_in_command_complete() -> None:
+    """The tripwire in ``_command_complete`` on its own, not only the one in ``readline``."""
+    imap = make_sink()
+    tag = arm(imap)
+    with pytest.raises(HookBypassed) as err:
+        imap._command_complete("NOOP", tag)
+    assert err.value.check == "unvetted_tag"
+    assert imap.discarded
