@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, Final, NoReturn
 
 from mailferret.imap import grammar
-from mailferret.imap.caps import LINE_OVERHEAD_BYTES, CommandCaps, default_caps
+from mailferret.imap.caps import CommandCaps, default_caps
 from mailferret.imap.errors import (
     BreachKind,
     HookBypassed,
@@ -23,7 +23,7 @@ from mailferret.imap.errors import (
     ViolationReason,
 )
 from mailferret.imap.probe import PreTlsBytes, bytes_pending
-from mailferret.limits import Limits
+from mailferret.limits import LINE_OVERHEAD_BYTES, Limits
 
 _LITERAL_END: Final = re.compile(rb"\{(\d{1,10})\}\Z")
 _TAIL: Final = 16
