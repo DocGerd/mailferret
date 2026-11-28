@@ -192,6 +192,31 @@ HIDDEN_VECTORS = {
     "color_on_parent_bg": (
         '<div style="background:#123456"><span style="color:#123456">{c}</span></div>'
     ),
+    "size_exponent_zero": '<span style="font-size:0e0px">{c}</span>',
+    "size_exponent_tiny": '<span style="font-size:1e-9px">{c}</span>',
+    "size_exponent_unitless_zero": '<span style="font-size:0e0">{c}</span>',
+    "opacity_exponent_zero": '<span style="opacity:0e0">{c}</span>',
+    "opacity_exponent_tiny": '<span style="opacity:1e-9">{c}</span>',
+    "opacity_calc": '<span style="opacity:calc(0)">{c}</span>',
+    "opacity_min": '<span style="opacity:min(0,1)">{c}</span>',
+    "opacity_percent_zero": '<span style="opacity:0%">{c}</span>',
+    "offset_exponent": '<span style="position:absolute;left:-1e9px">{c}</span>',
+    "offset_calc": '<span style="position:absolute;left:calc(0px - 9999px)">{c}</span>',
+    "indent_min": '<p style="text-indent:min(-5000px,1px)">{c}</p>',
+    "size_calc_zero": '<span style="font-size:calc(0px)">{c}</span>',
+    "size_min": '<span style="font-size:min(0px,12px)">{c}</span>',
+    "size_min_unknown": '<span style="font-size:min(0px,var(--x))">{c}</span>',
+    "size_clamp": '<span style="font-size:clamp(0px,0px,0px)">{c}</span>',
+    "size_max_zero": '<span style="font-size:max(0px,0px)">{c}</span>',
+    "size_calc_product": '<span style="font-size:calc(12px * 0)">{c}</span>',
+    "size_calc_difference": '<span style="font-size:calc((2px + 3px) - 5px)">{c}</span>',
+    "size_calc_exponent": '<span style="font-size:calc(1e-9px)">{c}</span>',
+    "size_calc_too_deep": '<span style="font-size:'
+    + "calc(" * 60
+    + "12px"
+    + ")" * 60
+    + '">{c}</span>',
+    "clipped_box_calc": '<div style="max-height:calc(0px);overflow:hidden">{c}</div>',
     "transparent_bg_no_coloured_ancestor": (
         '<span style="background:transparent;color:#fff">{c}</span>'
     ),
@@ -257,6 +282,13 @@ INHERITED_HIDDEN_VECTORS = {
         '<span style="font-size:0"><b style="font:12px/1.5">{c}</b></span>'
     ),
     "font_tiny_size_in_invalid_shorthand": '<b style="font:bogus 0 a">{c}</b>',
+    "size_calc_under_tiny": (
+        '<span style="font-size:0"><b style="font-size:calc(12px)">{c}</b></span>'
+    ),
+    "size_max_under_tiny": (
+        '<span style="font-size:0"><b style="font-size:max(12px,1px)">{c}</b></span>'
+    ),
+    "size_calc_var_top_level_then_zero": '<b style="font-size:12px;font-size:calc(0px)">{c}</b>',
     "size_sheet_em": ('<style>b{{font-size:1em}}</style><div style="font-size:0"><b>{c}</b></div>'),
     "size_sheet_absolute_then_inline_em": (
         "<style>.a{{font-size:12px}}</style>"
@@ -310,6 +342,18 @@ def test_hidden_vector_is_removed(name: str) -> None:
         '<div style="visibility:hidden"><span style="visibility:initial">{c}</span></div>',
         '<div style="font-size:0"><span style="font-size:large">{c}</span></div>',
         '<div style="font-size:0"><span style="font-size:13px">{c}</span></div>',
+        '<div style="font-size:0"><span style="font-size:1e1px">{c}</span></div>',
+        '<span style="font-size:1em">{c}</span>',
+        '<span style="font-size:1ex">{c}</span>',
+        '<span style="font-size:calc(12px)">{c}</span>',
+        '<span style="font-size:max(12px,0px)">{c}</span>',
+        '<span style="font-size:clamp(10px,1em,20px)">{c}</span>',
+        '<span style="font-size:calc(1em + 2px)">{c}</span>',
+        '<span style="opacity:1e-1">{c}</span>',
+        '<span style="opacity:calc(1)">{c}</span>',
+        '<span style="opacity:50%">{c}</span>',
+        '<span style="position:absolute;left:-1e2px">{c}</span>',
+        '<span style="position:absolute;left:calc(1px - 99px)">{c}</span>',
         '<div style="font-size:0"><span style="font-size:12pt">{c}</span></div>',
         '<div style="font-size:0"><span style="font-size:0.2in">{c}</span></div>',
         '<div style="font-size:0"><span style="font-size:initial">{c}</span></div>',
@@ -732,7 +776,7 @@ _ORACLE_KEYWORDS = {
     *("xx-small", "x-small", "small", "medium", "large", "x-large", "xx-large", "xxx-large"),
     "initial",
 }
-_NUMBER_TEXT = re.compile(r"(\d*\.?\d+)([a-z%]*)")
+_NUMBER_TEXT = re.compile(r"(\d*\.?\d+(?:e[+-]?\d+)?)([a-z%]*)")
 
 
 def _oracle_size_clears(value: str) -> bool:
@@ -744,7 +788,9 @@ def _oracle_size_clears(value: str) -> bool:
     return float(match.group(1)) * _ORACLE_PX[match.group(2)] > 4 / 3
 
 
-_numbers = st.sampled_from(["0", "0.5", "1", "1.5", "2", "12", "13.5", "100", "0.0001", "-1"])
+_numbers = st.sampled_from(
+    ["0", "0.5", "1", "1.5", "2", "12", "13.5", "100", "0.0001", "-1", "0e0", "1e-9", "1e1", "2e0"]
+)
 _units = st.sampled_from(
     ["", "px", "pt", "pc", "cm", "mm", "in", "q", "em", "%", "ex", "ch", "rem", "vw", "vh", "fr"]
 )
@@ -752,6 +798,9 @@ _size_values = st.one_of(
     st.builds(lambda n, u: n + u, _numbers, _units),
     st.sampled_from(sorted(_ORACLE_KEYWORDS | {"larger", "smaller", "inherit", "unset", "revert"})),
     st.sampled_from(["calc(1px+1em)", "var(--s)", "env(x)", "min(1px,1em)", "clamp(1px,1em,2px)"]),
+    st.sampled_from(
+        ["calc(0px)", "calc(12px)", "min(0px,12px)", "max(12px,0px)", "clamp(0px,0px,0px)"]
+    ),
     st.from_regex(r"[a-z0-9%.()-]{1,12}", fullmatch=True),
 )
 _visibility_values = st.one_of(
@@ -817,6 +866,42 @@ def test_fuzz_same_element_only_an_allowlisted_size_overrides_an_earlier_zero(
     child = f'<b style="font-size:0;font-size:{value}">{CANARY}</b>'
     html = f'<div style="font-size:0">{child}</div>' if tiny_parent else child
     assert (html_to_text(html).text == CANARY) == _oracle_size_clears(value)
+
+
+_leaf = st.sampled_from([-2000, -1000, -5, 0, 1, 2, 3, 12, 20]).map(lambda n: (f"{n}px", n))
+
+
+def _extend(children: st.SearchStrategy[tuple[str, int]]) -> st.SearchStrategy[tuple[str, int]]:
+    pair = st.tuples(children, children)
+    triple = st.tuples(children, children, children)
+    return st.one_of(
+        pair.map(lambda t: (f"({t[0][0]} + {t[1][0]})", t[0][1] + t[1][1])),
+        pair.map(lambda t: (f"({t[0][0]} - {t[1][0]})", t[0][1] - t[1][1])),
+        st.tuples(children, st.sampled_from([-1, 0, 2, 3])).map(
+            lambda t: (f"({t[0][0]} * {t[1]})", t[0][1] * t[1])
+        ),
+        pair.map(lambda t: (f"min({t[0][0]}, {t[1][0]})", min(t[0][1], t[1][1]))),
+        pair.map(lambda t: (f"max({t[0][0]}, {t[1][0]})", max(t[0][1], t[1][1]))),
+        triple.map(
+            lambda t: (
+                f"clamp({t[0][0]}, {t[1][0]}, {t[2][0]})",
+                max(t[0][1], min(t[1][1], t[2][1])),
+            )
+        ),
+    )
+
+
+_constants = st.recursive(_leaf, _extend, max_leaves=6)
+
+
+@FUZZ
+@given(_constants)
+def test_fuzz_constant_math_hides_exactly_below_the_thresholds(expr: tuple[str, int]) -> None:
+    text, value = expr
+    size = html_to_text(f'<span style="font-size:calc({text})">{CANARY}</span>')
+    assert (size.text == "") == (value <= 4 / 3)
+    offset = html_to_text(f'<span style="position:absolute;left:calc({text})">{CANARY}</span>')
+    assert (offset.text == "") == (value <= -1000)
 
 
 @FUZZ

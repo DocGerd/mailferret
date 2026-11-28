@@ -42,7 +42,7 @@ _IDENT_RUN: Final = re.compile(r"(?:[\w-]|\\(?:[0-9a-fA-F]{1,6}[ \t\n]?|.))+", r
 _URL_BODY: Final = re.compile(r"url\((?![ \t\r\n\f]*[\"'])([^)]*)\)?")
 _COMMENT_SCAN: Final = re.compile(_SKIPPED + r"|/\*", re.DOTALL)
 _STRUCTURE: Final = re.compile(_SKIPPED + r"|[(){};]", re.DOTALL)
-_NUMBER: Final = re.compile(r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))([a-z%]*)")
+_NUMBER: Final = re.compile(r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)([a-z%]*)")
 _SIMPLE_SELECTOR: Final = re.compile(r"([a-z][a-z0-9]*)?(?:([.#])([a-z_][\w-]*))?")
 _HEX_COLOR: Final = re.compile(r"#([0-9a-f]{3,8})")
 _RGB_COLOR: Final = re.compile(
@@ -69,6 +69,8 @@ _ABSOLUTE_UNITS: Final = {
     "q": 96 / 101.6,
 }
 _TINY_PX: Final = 4 / 3  # one point
+_EM_PX: Final = 16.0  # an em, for the off-screen and zero-box checks only
+_ALPHA_STEP: Final = 1 / 255
 _OFFSET_PROPERTIES: Final = frozenset(
     {"left", "right", "top", "bottom", "text-indent", "margin-left"}
 )
@@ -352,11 +354,195 @@ _SIZE_KEYWORDS: Final = frozenset(
 )
 
 
-_STRICT_LENGTH: Final = re.compile(r"(?:\d+(?:\.\d+)?|\.\d+)[a-z]+")
+# --- constant math functions -----------------------------------------------------------------
+
+_MATH_FUNCTIONS: Final = frozenset({"calc", "min", "max", "clamp"})
+_MATH_TOKEN: Final = re.compile(
+    r"\s*(?:(?P<num>[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)(?P<unit>[a-z%]*)"
+    r"|(?P<fn>[a-z-]+)\(|(?P<op>[-+*/(),)])|(?P<word>[^\s()+*/,-]+))"
+)
+_MAX_MATH_DEPTH: Final = 24
+_DEEP: Final = float("-inf")  # too deeply nested: fails closed, below every hiding threshold
+_Token = tuple[str, str, str]  # kind (num, fn, op, word), text, unit
+_Val = tuple[float | None, bool]  # a value or upper bound (None: unknown), and whether exact
+_UNKNOWN: Final[_Val] = (None, False)
+
+
+class _Bail(Exception):
+    """The expression is not one this module understands."""
+
+
+class _TooDeep(Exception):
+    """Nesting beyond ``_MAX_MATH_DEPTH``."""
+
+
+def _math_tokens(text: str) -> list[_Token] | None:
+    tokens: list[_Token] = []
+    position = 0
+    while position < len(text):
+        match = _MATH_TOKEN.match(text, position)
+        if match is None:
+            return None if text[position:].strip() else tokens
+        position = match.end()
+        for kind in ("num", "fn", "op", "word"):
+            if match.group(kind) is not None:
+                tokens.append((kind, match.group(kind), match.group("unit") or ""))
+                break
+    return tokens
+
+
+class _MathParser:
+    """Evaluates ``calc()``, ``min()``, ``max()`` and ``clamp()`` over constants only.
+
+    Anything not constant (``var()``, ``env()``, ``%`` and, unless ``em`` is given, ``em`` and
+    ``rem``) is unknown. ``min()`` and ``clamp()`` still give an upper bound, which is all the
+    hiding checks need.
+    """
+
+    def __init__(self, tokens: list[_Token], em: float | None) -> None:
+        self.tokens = tokens
+        self.index = 0
+        self.em = em
+
+    def _peek(self, kind: str, *texts: str) -> bool:
+        if self.index >= len(self.tokens):
+            return False
+        token = self.tokens[self.index]
+        return token[0] == kind and token[1] in texts
+
+    def _next(self) -> _Token:
+        if self.index >= len(self.tokens):
+            raise _Bail
+        self.index += 1
+        return self.tokens[self.index - 1]
+
+    def _expect(self, text: str) -> None:
+        if self._next()[1] != text:
+            raise _Bail
+
+    def done(self) -> bool:
+        return self.index == len(self.tokens)
+
+    def total(self, depth: int) -> _Val:
+        value = self._product(depth)
+        while self._peek("op", "+", "-"):
+            sign = self._next()[1]
+            left, right = value[0], self._product(depth)
+            if left is None or right[0] is None or not (value[1] and right[1]):
+                value = _UNKNOWN
+            else:
+                value = (left + right[0] if sign == "+" else left - right[0], True)
+        return value
+
+    def _product(self, depth: int) -> _Val:
+        value = self._operand(depth)
+        while self._peek("op", "*", "/"):
+            sign = self._next()[1]
+            left, right = value[0], self._operand(depth)
+            if sign == "*" and ((value[1] and left == 0) or (right[1] and right[0] == 0)):
+                value = (0.0, True)
+            elif left is None or right[0] is None or not (value[1] and right[1]):
+                value = _UNKNOWN
+            elif sign == "*":
+                value = (left * right[0], True)
+            else:
+                value = (left / right[0], True) if right[0] != 0 else _UNKNOWN
+        return value
+
+    def _operand(self, depth: int) -> _Val:
+        if depth > _MAX_MATH_DEPTH:
+            raise _TooDeep
+        kind, text, unit = self._next()
+        if kind == "num":
+            return self._number(text, unit)
+        if kind == "op" and text == "(":
+            value = self.total(depth + 1)
+            self._expect(")")
+            return value
+        if kind == "fn" and text in _MATH_FUNCTIONS:
+            return self._call(text, depth + 1)
+        if kind == "fn":
+            self._skip_group()
+            return _UNKNOWN
+        if kind == "word":
+            return _UNKNOWN
+        raise _Bail
+
+    def _skip_group(self) -> None:
+        open_groups = 1
+        while open_groups:
+            kind, text, _ = self._next()
+            if kind == "fn" or (kind == "op" and text == "("):
+                open_groups += 1
+            elif kind == "op" and text == ")":
+                open_groups -= 1
+
+    def _number(self, text: str, unit: str) -> _Val:
+        try:
+            number = float(text)
+        except (ValueError, OverflowError):
+            raise _Bail from None
+        if unit == "":
+            return number, True
+        if unit in _ABSOLUTE_UNITS:
+            return number * _ABSOLUTE_UNITS[unit], True
+        if unit in ("em", "rem") and self.em is not None:
+            return number * self.em, True
+        return (0.0, True) if number == 0 else _UNKNOWN
+
+    def _call(self, name: str, depth: int) -> _Val:
+        args = [self.total(depth)]
+        while self._peek("op", ","):
+            self._next()
+            args.append(self.total(depth))
+        self._expect(")")
+        known = [a[0] for a in args if a[0] is not None]
+        exact = all(a[1] for a in args)
+        if name == "calc":
+            if len(args) != 1:
+                raise _Bail
+            return args[0]
+        if name == "min":
+            return (min(known), exact) if known else _UNKNOWN
+        if name == "max":
+            return (max(known), True) if exact and known else _UNKNOWN
+        if len(args) != 3:
+            raise _Bail
+        low, value, high = args
+        if low[1] and high[1] and low[0] is not None and high[0] is not None:
+            if value[1] and value[0] is not None:
+                return max(low[0], min(value[0], high[0])), True
+            return max(low[0], high[0]), False
+        return _UNKNOWN
+
+
+def _math_value(value: str, em: float | None) -> float | None:
+    """The value (or an upper bound) of a constant math function, ``None`` if not one."""
+    if value.split("(", 1)[0].strip() not in _MATH_FUNCTIONS or not value.endswith(")"):
+        return None
+    tokens = _math_tokens(value)
+    if tokens is None:
+        return None
+    parser = _MathParser(tokens, em)
+    try:
+        result = parser.total(0)
+    except _TooDeep:
+        return _DEEP
+    except _Bail:
+        return None
+    if not parser.done() or result[0] is None:
+        return None
+    return _DEEP if result[0] != result[0] else result[0]
+
+
+_STRICT_LENGTH: Final = re.compile(r"(?:\d+(?:\.\d+)?|\.\d+)(?:e[+-]?\d+)?[a-z]+")
 
 
 def _size_flag(value: str) -> Flag:
     """Classify one size value: only an absolute length or keyword may clear a tiny size."""
+    constant = _math_value(value, None)
+    if constant is not None:
+        return Flag.ON if constant <= _TINY_PX else Flag.INHERIT
     number = _number(value)
     if number is not None:
         size, unit = number
@@ -404,16 +590,35 @@ def _visibility(value: str) -> Flag:
 
 def _off_screen(value: str) -> bool:
     parsed = _number(value)
-    return parsed is not None and parsed[0] <= -_FAR and parsed[1] in ("", "px", "pt", "em", "rem")
+    if parsed is None:
+        constant = _math_value(value, _EM_PX)
+        return constant is not None and constant <= -_FAR
+    return parsed[0] <= -_FAR and parsed[1] in ("", "px", "pt", "em", "rem")
+
+
+def _transparent(value: str) -> bool:
+    """Whether an ``opacity`` value renders as nothing (below one 8-bit alpha step)."""
+    number = _number(value)
+    if number is not None:
+        return number[0] / (100 if number[1] == "%" else 1) < _ALPHA_STEP
+    constant = _math_value(value, None)
+    return constant is not None and constant < _ALPHA_STEP
+
+
+def _empty_size(value: str) -> bool:
+    number = _number(value)
+    if number is not None:
+        return number[0] <= 0
+    constant = _math_value(value, _EM_PX)
+    return constant is not None and constant <= 0
 
 
 def _hides(name: str, value: str) -> bool:
     """Whether one declaration removes the element and everything below it."""
-    number = _number(value)
     if name == "display":
         return value == "none"
     if name == "opacity":
-        return number is not None and number[0] <= 0
+        return _transparent(value)
     if name == "mso-hide":
         return value == "all"
     if name in _OFFSET_PROPERTIES:
@@ -513,8 +718,7 @@ def evaluate(declarations: Declarations) -> Style:
         elif name in ("overflow", "overflow-x", "overflow-y"):
             clipped = clipped or any(word in _CLIPPING for word in value.split())
         elif name in _SIZE_PROPERTIES:
-            number = _number(value)
-            zero_size = zero_size or (number is not None and number[0] <= 0)
+            zero_size = zero_size or _empty_size(value)
     return Style(
         hidden or (clipped and zero_size),
         _props([d for d in declarations if not d[2]]),

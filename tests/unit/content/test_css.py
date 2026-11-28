@@ -198,3 +198,57 @@ def test_visibility_allowlist(value: str, expected: Flag) -> None:
 )
 def test_backdrop_of_gradients_and_fallbacks(css: str, expected: ColorValue) -> None:
     assert evaluate(parse_declarations(css)[0]).background == expected
+
+
+def test_exponents_parse_and_em_is_not_an_exponent() -> None:
+    assert _tiny("font-size:1e1px") is Flag.OFF
+    assert _tiny("font-size:1e-9px") is Flag.ON
+    assert _tiny("font-size:1em") is Flag.INHERIT
+    assert _tiny("font-size:1ex") is Flag.INHERIT
+    assert _tiny("font-size:1e1em") is Flag.INHERIT
+
+
+@pytest.mark.parametrize(
+    ("css", "expected"),
+    [
+        ("font-size:calc(0px)", Flag.ON),
+        ("font-size:min(0px,12px)", Flag.ON),
+        ("font-size:min(0px,var(--x))", Flag.ON),
+        ("font-size:clamp(0px,0px,0px)", Flag.ON),
+        ("font-size:clamp(0px,var(--x),0px)", Flag.ON),
+        ("font-size:calc(0.5em * 0)", Flag.ON),
+        ("font-size:calc(12px)", Flag.INHERIT),
+        ("font-size:max(12px,0px)", Flag.INHERIT),
+        ("font-size:max(0px,var(--x))", Flag.INHERIT),
+        ("font-size:calc(1em + 0px)", Flag.INHERIT),
+        ("font-size:calc(0px", Flag.INHERIT),
+        ("font-size:calc(0px) bogus", Flag.INHERIT),
+        ("font-size:calc(0px 1px)", Flag.INHERIT),
+        ("font-size:calc(1px / 0)", Flag.INHERIT),
+    ],
+)
+def test_constant_math_functions(css: str, expected: Flag) -> None:
+    flag = _tiny(css)
+    assert flag is expected
+
+
+def test_nested_math_is_bounded_and_fails_closed() -> None:
+    started = time.monotonic()
+    deep = "font-size:" + "calc(" * 200_000 + "12px" + ")" * 200_000
+    assert _tiny(deep) is Flag.ON
+    flat = "font-size:calc(" + "1px + " * 200_000 + "1px)"
+    assert _tiny(flat) is Flag.INHERIT
+    assert time.monotonic() - started < 3.0
+
+
+def test_opacity_and_offsets_accept_exponents_and_math() -> None:
+    for css in (
+        "opacity:0e0",
+        "opacity:1e-9",
+        "opacity:calc(0)",
+        "left:-1e9px",
+        "left:calc(-9999px)",
+    ):
+        assert evaluate(parse_declarations(css)[0]).hidden, css
+    for css in ("opacity:1", "opacity:1e-1", "opacity:calc(1)", "left:-1e2px", "left:1e9px"):
+        assert not evaluate(parse_declarations(css)[0]).hidden, css
