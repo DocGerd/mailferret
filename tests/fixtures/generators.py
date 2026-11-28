@@ -100,6 +100,53 @@ def plain_pdf(pages: int = 1, text: str = "Hello PDF") -> bytes:
     return _pdf(objects)
 
 
+def nested_page_tree_pdf(pages: int, depth: int) -> bytes:
+    """``depth`` /Pages levels above ``pages`` leaf pages that share one content stream."""
+    objects: dict[int, bytes] = {
+        1: b"<< /Type /Catalog /Pages 2 0 R >>",
+        3: _stream(b"BT /F1 12 Tf 72 720 Td (Hello PDF) Tj ET"),
+        4: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    }
+    first_leaf = 5 + depth - 1
+    for level in range(depth):
+        num = 2 if level == 0 else 4 + level
+        parent = b"" if level == 0 else b"/Parent %d 0 R " % (num - 1 if level > 1 else 2)
+        if level + 1 < depth:
+            kids = b"%d 0 R" % (5 + level)
+        else:
+            kids = b" ".join(b"%d 0 R" % (first_leaf + i) for i in range(pages))
+        objects[num] = b"<< /Type /Pages %s/Kids [%s] /Count %d >>" % (parent, kids, pages)
+    last = 2 if depth == 1 else 4 + depth - 1
+    for i in range(pages):
+        objects[first_leaf + i] = (
+            b"<< /Type /Page /Parent %d 0 R /MediaBox [0 0 612 792] /Contents 3 0 R "
+            b"/Resources << /Font << /F1 4 0 R >> >> >>" % last
+        )
+    return _pdf(objects)
+
+
+def format_control_pdf() -> bytes:
+    """Text drawn as ``(AB)`` whose ToUnicode map yields U+202E and U+200B around ``xyz``."""
+    cmap = (
+        b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n"
+        b"/CMapName /Test def /CMapType 2 def\n"
+        b"1 begincodespacerange <00> <FF> endcodespacerange\n"
+        b"3 beginbfchar <41> <202E> <42> <200B> <43> <0078> endbfchar\n"
+        b"endcmap CMapName currentdict /CMap defineresource pop end end"
+    )
+    return _pdf(
+        {
+            1: b"<< /Type /Catalog /Pages 2 0 R >>",
+            2: b"<< /Type /Pages /Kids [5 0 R] /Count 1 >>",
+            3: _stream(b"BT /F1 12 Tf 72 720 Td (ABC) Tj ET"),
+            4: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 6 0 R >>",
+            5: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 3 0 R "
+            b"/Resources << /Font << /F1 4 0 R >> >> >>",
+            6: _stream(cmap),
+        }
+    )
+
+
 def jbig2_content_pdf() -> bytes:
     """A complete page whose content stream names the ``/JBIG2Decode`` filter."""
     return _pdf(

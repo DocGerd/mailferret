@@ -47,7 +47,14 @@ _IDENTITY_ENCODINGS: Final = frozenset({"7bit", "8bit", "binary", ""})
 _BODY_TYPES: Final = ("text/plain", "text/html")
 
 NoteKind = Literal[
-    "limit_exceeded", "malformed", "part_failed", "charset_fallback", "unsupported", "extra_text"
+    "limit_exceeded",
+    "malformed",
+    "part_failed",
+    "charset_fallback",
+    "unsupported",
+    "extra_text",
+    "format_stripped",
+    "memory_cap_unavailable",
 ]
 
 

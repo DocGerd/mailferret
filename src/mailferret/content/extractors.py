@@ -1,13 +1,16 @@
 """Attachment text extractors keyed by MIME type (A§2, T-06).
 
 Every extractor takes the part as fetched (transfer-encoded) and returns a :class:`DecodedPart`
-within the same byte and char limits; one failing part costs a note, never the message. The HTML
+within the same byte and char limits; one failing part costs a note, never the message. ``Cf``
+controls are removed from every result and noted. The HTML
 slot is filled by the HTML converter (C3); until then it reports ``unsupported``.
 """
 
 from __future__ import annotations
 
+import unicodedata
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from types import MappingProxyType
 from typing import Final
 
@@ -25,6 +28,22 @@ from mailferret.limits import Limits
 _DEFAULT_LIMITS: Final = Limits()
 
 Extractor = Callable[[PartInfo, bytes, Limits], DecodedPart]
+
+
+def strip_format_controls(text: str) -> tuple[str, bool]:
+    """Remove Unicode ``Cf`` characters (bidi overrides, zero-width, tag characters, T-04)."""
+    kept = "".join(c for c in text if unicodedata.category(c) != "Cf")
+    return kept, len(kept) != len(text)
+
+
+def _sanitize(result: DecodedPart) -> DecodedPart:
+    if result.text is None:
+        return result
+    text, removed = strip_format_controls(result.text)
+    if not removed:
+        return result
+    note = Note("format_stripped", part=result.section)
+    return replace(result, text=text, notes=(*result.notes, note))
 
 
 def _failed(part: PartInfo, *notes: Note) -> DecodedPart:
@@ -72,6 +91,6 @@ def extract_text(
             return _failed(part, Note("unsupported", part=part.section))
         if len(data) > limits.max_attachment_bytes:
             return _failed(part, Note("limit_exceeded", "L-08", part.section))
-        return extractor(part, data, limits)
+        return _sanitize(extractor(part, data, limits))
     except Exception:  # per-part fault isolation
         return _failed(part, Note("part_failed", part=part.section))
