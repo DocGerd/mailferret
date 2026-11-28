@@ -12,7 +12,7 @@ from mailferret.limits import Limits
 # the dict entry, its key, the list and the bytes object. Not a [limits] key: lowering it
 # would weaken the bound. tests/unit/imap/test_overhead.py measures it with tracemalloc on
 # every supported minor and fails if a minor keeps more.
-LINE_OVERHEAD_BYTES: Final = 320
+LINE_OVERHEAD_BYTES: Final = 256
 
 
 class LiteralItem(Enum):
