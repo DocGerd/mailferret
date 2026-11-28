@@ -53,7 +53,7 @@ def _forms(secret: str) -> list[str]:
 
 def _outside_the_command(server: FakeImapServer, secret: str) -> list[str]:
     """Wire lines holding the secret that are neither the LOGIN line nor the PLAIN blob."""
-    blobs = {sasl(LOGIN, secret), sasl("ülrich@example.com", secret)}
+    blobs = {sasl(LOGIN, secret), sasl("üser@example.com", secret)}
     return [
         line
         for line in server.wire
@@ -122,7 +122,7 @@ def test_a_non_ascii_secret_takes_plain_in_utf8(make_rig: Maker) -> None:
 
 
 def test_a_non_ascii_login_takes_plain_in_utf8(make_rig: Maker) -> None:
-    login = "ülrich@example.com"
+    login = "üser@example.com"
     rig = make_rig(PLAIN_OFFERED, secret=None)
     rig.store(PASSWORD, login)
     rig.pool(login).call(lambda s: s.noop())
@@ -171,7 +171,7 @@ def test_a_non_ascii_secret_without_plain_is_refused_with_fixed_text(make_rig: M
 def test_a_non_ascii_login_without_plain_is_refused_before_the_backend_is_asked(
     make_rig: Maker,
 ) -> None:
-    login = "ülrich@example.com"
+    login = "üser@example.com"
     rig = make_rig(BASE, secret=None)
     rig.store(PASSWORD, login)
     with pytest.raises(AuthFailed) as err:
