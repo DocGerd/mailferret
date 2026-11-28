@@ -221,10 +221,10 @@ def test_exponents_parse_and_em_is_not_an_exponent() -> None:
         ("font-size:max(12px,0px)", Flag.INHERIT),
         ("font-size:max(0px,var(--x))", Flag.INHERIT),
         ("font-size:calc(1em + 0px)", Flag.INHERIT),
-        ("font-size:calc(0px", Flag.INHERIT),
+        ("font-size:calc(0px", Flag.ON),
         ("font-size:calc(0px) bogus", Flag.INHERIT),
         ("font-size:calc(0px 1px)", Flag.INHERIT),
-        ("font-size:calc(1px / 0)", Flag.INHERIT),
+        ("font-size:calc(1px / 0)", Flag.ON),
     ],
 )
 def test_constant_math_functions(css: str, expected: Flag) -> None:
@@ -252,3 +252,126 @@ def test_opacity_and_offsets_accept_exponents_and_math() -> None:
         assert evaluate(parse_declarations(css)[0]).hidden, css
     for css in ("opacity:1", "opacity:1e-1", "opacity:calc(1)", "left:-1e2px", "left:1e9px"):
         assert not evaluate(parse_declarations(css)[0]).hidden, css
+
+
+UNIMPLEMENTED = [
+    "round(0.4px,1px)",
+    "abs(0px)",
+    "sign(0)",
+    "sin(0)",
+    "cos(1)",
+    "mod(5px,2px)",
+    "rem(5px,2px)",
+    "pow(2,3)",
+    "hypot(3px,4px)",
+    "log(1)",
+    "exp(0)",
+    "atan2(1,1)",
+    "attr(x)",
+    "foo(1)",
+    "-webkit-foo(1)",
+    "calc(round(1px,1px))",
+]
+
+
+@pytest.mark.parametrize("function", UNIMPLEMENTED)
+def test_unimplemented_functions_fail_closed_in_every_hiding_property(function: str) -> None:
+    assert _tiny(f"font-size:{function}") is Flag.ON
+    assert _tiny(f"font:{function} a") is Flag.ON
+    assert evaluate(parse_declarations(f"visibility:{function}")[0]).invisible is Flag.ON
+    for css in (f"opacity:{function}", f"left:{function}", f"text-indent:{function}"):
+        assert evaluate(parse_declarations(css)[0]).hidden, css
+    boxed = evaluate(parse_declarations(f"overflow:hidden;max-height:{function}")[0])
+    assert boxed.hidden
+
+
+@pytest.mark.parametrize(
+    "function", ["var(--x)", "env(x)", "var(--x, 1px)", "calc(var(--x) + 1px)"]
+)
+def test_var_and_env_stay_unknown(function: str) -> None:
+    assert _tiny(f"font-size:{function}") is Flag.INHERIT
+    assert _tiny(f"font:{function} a") is Flag.INHERIT
+    if function.startswith(("var", "env")):
+        assert evaluate(parse_declarations(f"visibility:{function}")[0]).invisible is Flag.INHERIT
+    for css in (f"opacity:{function}", f"left:{function}"):
+        assert not evaluate(parse_declarations(css)[0]).hidden, css
+
+
+@pytest.mark.parametrize(
+    ("css", "expected"),
+    [
+        ("font-size:-webkit-calc(0px)", Flag.ON),
+        ("font-size:-moz-calc(0px)", Flag.ON),
+        ("font-size:-webkit-calc(12px)", Flag.INHERIT),
+        ("font-size:calc(0px / 0)", Flag.ON),
+        ("font-size:calc(0 / 0)", Flag.ON),
+        ("font-size:calc(1px / 0)", Flag.ON),
+        ("font-size:calc(-1px / 0)", Flag.ON),
+        ("font-size:calc(0px * nan)", Flag.ON),
+        ("font-size:calc(nan * 1px)", Flag.ON),
+        ("font-size:calc(infinity * 1px)", Flag.ON),
+        ("font-size:calc(-infinity * 1px)", Flag.ON),
+        ("font-size:calc(infinity * 0px)", Flag.ON),
+        ("font-size:min(nan * 1px, 20px)", Flag.ON),
+        ("font-size:min(20px, nan * 1px)", Flag.ON),
+        ("font-size:max(20px, nan * 1px)", Flag.ON),
+        ("font-size:clamp(20px, 30px, nan * 1px)", Flag.ON),
+        ("font-size:calc(pi * 0px)", Flag.ON),
+        ("font-size:calc(pi * 1px)", Flag.INHERIT),
+        ("font-size:calc(e * 1px)", Flag.INHERIT),
+        ("font-size:calc(1e999px)", Flag.ON),
+        ("font:calc(0px) a", Flag.ON),
+        ("font:calc(12px) a", Flag.INHERIT),
+        ("font:calc(12px/2) a", Flag.INHERIT),
+        ("font:calc(0px)/1 a", Flag.ON),
+        ("font:12px/calc(0px) a", Flag.INHERIT),
+        ("font:clamp(14px,2vw,18px) a", Flag.INHERIT),
+    ],
+)
+def test_degenerate_results_prefixes_and_shorthand_math(css: str, expected: Flag) -> None:
+    assert _tiny(css) is expected
+
+
+@pytest.mark.parametrize(
+    "css",
+    [
+        "opacity:calc(0/0)",
+        "opacity:calc(nan)",
+        "opacity:calc(0%)",
+        "opacity:min(0%,1)",
+        "opacity:calc(0.2%)",
+        "opacity:min(1, 0.2%)",
+        "opacity:calc(1/0)",
+        "left:calc(-infinity * 1px)",
+        "left:calc(nan * 1px)",
+        "left:calc(1px / 0)",
+        "left:-webkit-calc(-9999px)",
+    ],
+)
+def test_degenerate_opacity_and_offset_values_hide(css: str) -> None:
+    assert evaluate(parse_declarations(css)[0]).hidden
+
+
+@pytest.mark.parametrize(
+    "css",
+    ["opacity:calc(0.5)", "opacity:calc(50%)", "opacity:min(50%,1)", "left:calc(1px - 99px)"],
+)
+def test_ordinary_math_does_not_hide(css: str) -> None:
+    assert not evaluate(parse_declarations(css)[0]).hidden
+
+
+def test_non_finite_results_fail_closed_even_where_they_are_not_small() -> None:
+    # Without the finite check NaN compares false and +inf is not tiny: both would show the text.
+    assert _tiny("font-size:calc(0px / 0)") is Flag.ON
+    assert _tiny("font-size:calc(infinity * 1px)") is Flag.ON
+    assert evaluate(parse_declarations("left:calc(1px / 0)")[0]).hidden
+    assert evaluate(parse_declarations("opacity:calc(nan)")[0]).hidden
+
+
+def test_an_upper_bound_is_never_used_as_an_exact_operand() -> None:
+    # min() with an unknown only bounds the value from above: later arithmetic must not treat
+    # the bound as the value, or readable text is hidden.
+    assert _tiny("font-size:calc(min(0px, var(--x)) * -1)") is Flag.INHERIT
+    assert _tiny("font-size:calc(1px - min(0px, var(--x)))") is Flag.INHERIT
+    assert _tiny("font-size:calc(1em + 2px)") is Flag.INHERIT
+    assert _tiny("font-size:calc(1em * 0 + 12px)") is Flag.INHERIT

@@ -22,6 +22,7 @@ one point, a size keyword, ``visible``, ``initial``) clears an inherited state. 
 from __future__ import annotations
 
 import enum
+import math
 import re
 from dataclasses import dataclass
 from typing import Final
@@ -357,12 +358,20 @@ _SIZE_KEYWORDS: Final = frozenset(
 # --- constant math functions -----------------------------------------------------------------
 
 _MATH_FUNCTIONS: Final = frozenset({"calc", "min", "max", "clamp"})
+_UNKNOWN_FUNCTIONS: Final = frozenset({"var", "env"})  # their value is not in the mail
+_FUNCTION: Final = re.compile(r"(-(?:webkit|moz)-)?([a-z][a-z0-9-]*)\(")
 _MATH_TOKEN: Final = re.compile(
     r"\s*(?:(?P<num>[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)(?P<unit>[a-z%]*)"
-    r"|(?P<fn>[a-z-]+)\(|(?P<op>[-+*/(),)])|(?P<word>[^\s()+*/,-]+))"
+    r"|(?P<fn>-?[a-z][a-z0-9-]*)\(|(?P<op>[-+*/(),)])|(?P<word>[^\s()+*/,-]+))"
 )
+_CONSTANTS: Final = {
+    "infinity": math.inf,
+    "nan": math.nan,
+    "pi": math.pi,
+    "e": math.e,
+}
 _MAX_MATH_DEPTH: Final = 24
-_DEEP: Final = float("-inf")  # too deeply nested: fails closed, below every hiding threshold
+_DEEP: Final = float("-inf")  # fails closed: below every hiding threshold
 _Token = tuple[str, str, str]  # kind (num, fn, op, word), text, unit
 _Val = tuple[float | None, bool]  # a value or upper bound (None: unknown), and whether exact
 _UNKNOWN: Final[_Val] = (None, False)
@@ -372,8 +381,18 @@ class _Bail(Exception):
     """The expression is not one this module understands."""
 
 
-class _TooDeep(Exception):
-    """Nesting beyond ``_MAX_MATH_DEPTH``."""
+class _FailClosed(Exception):
+    """Too deeply nested, or a function this module does not implement."""
+
+
+def _function_name(value: str) -> str | None:
+    """The name of the function a value starts with, without a vendor prefix."""
+    match = _FUNCTION.match(value)
+    return match.group(2) if match else None
+
+
+def _canonical(name: str) -> str:
+    return name.removeprefix("-webkit-").removeprefix("-moz-")
 
 
 def _math_tokens(text: str) -> list[_Token] | None:
@@ -391,18 +410,29 @@ def _math_tokens(text: str) -> list[_Token] | None:
     return tokens
 
 
+def _divide(left: float, right: float) -> float:
+    if right != 0:
+        return left / right
+    return math.nan if left == 0 or math.isnan(left) else math.copysign(math.inf, left)
+
+
+def _nonfinite(value: _Val) -> bool:
+    return value[1] and value[0] is not None and not math.isfinite(value[0])
+
+
 class _MathParser:
     """Evaluates ``calc()``, ``min()``, ``max()`` and ``clamp()`` over constants only.
 
-    Anything not constant (``var()``, ``env()``, ``%`` and, unless ``em`` is given, ``em`` and
-    ``rem``) is unknown. ``min()`` and ``clamp()`` still give an upper bound, which is all the
-    hiding checks need.
+    ``var()`` and ``env()`` are unknown, and so are ``%`` (unless ``percent`` gives its scale)
+    and ``em``/``rem`` (unless ``em`` is given). ``min()`` and ``clamp()`` still give an upper
+    bound, which is all the hiding checks need. Any other function fails closed.
     """
 
-    def __init__(self, tokens: list[_Token], em: float | None) -> None:
+    def __init__(self, tokens: list[_Token], em: float | None, percent: float | None) -> None:
         self.tokens = tokens
         self.index = 0
         self.em = em
+        self.percent = percent
 
     def _peek(self, kind: str, *texts: str) -> bool:
         if self.index >= len(self.tokens):
@@ -417,7 +447,7 @@ class _MathParser:
         return self.tokens[self.index - 1]
 
     def _expect(self, text: str) -> None:
-        if self._next()[1] != text:
+        if self.index < len(self.tokens) and self._next()[1] != text:  # end of input closes
             raise _Bail
 
     def done(self) -> bool:
@@ -439,33 +469,42 @@ class _MathParser:
         while self._peek("op", "*", "/"):
             sign = self._next()[1]
             left, right = value[0], self._operand(depth)
-            if sign == "*" and ((value[1] and left == 0) or (right[1] and right[0] == 0)):
+            zero = (value[1] and left == 0 and not _nonfinite(right)) or (
+                right[1] and right[0] == 0 and not _nonfinite(value)
+            )
+            if sign == "*" and zero:
                 value = (0.0, True)
             elif left is None or right[0] is None or not (value[1] and right[1]):
                 value = _UNKNOWN
             elif sign == "*":
                 value = (left * right[0], True)
             else:
-                value = (left / right[0], True) if right[0] != 0 else _UNKNOWN
+                value = (_divide(left, right[0]), True)
         return value
 
     def _operand(self, depth: int) -> _Val:
         if depth > _MAX_MATH_DEPTH:
-            raise _TooDeep
+            raise _FailClosed
         kind, text, unit = self._next()
         if kind == "num":
             return self._number(text, unit)
+        if kind == "op" and text in "+-":
+            value = self._operand(depth + 1)
+            return (-value[0], value[1]) if text == "-" and value[0] is not None else value
         if kind == "op" and text == "(":
             value = self.total(depth + 1)
             self._expect(")")
             return value
-        if kind == "fn" and text in _MATH_FUNCTIONS:
-            return self._call(text, depth + 1)
         if kind == "fn":
+            name = _canonical(text)
+            if name in _MATH_FUNCTIONS:
+                return self._call(name, depth + 1)
+            if name not in _UNKNOWN_FUNCTIONS:
+                raise _FailClosed
             self._skip_group()
             return _UNKNOWN
         if kind == "word":
-            return _UNKNOWN
+            return (_CONSTANTS[text], True) if text in _CONSTANTS else _UNKNOWN
         raise _Bail
 
     def _skip_group(self) -> None:
@@ -488,6 +527,8 @@ class _MathParser:
             return number * _ABSOLUTE_UNITS[unit], True
         if unit in ("em", "rem") and self.em is not None:
             return number * self.em, True
+        if unit == "%" and self.percent is not None:
+            return number * self.percent, True
         return (0.0, True) if number == 0 else _UNKNOWN
 
     def _call(self, name: str, depth: int) -> _Val:
@@ -498,6 +539,8 @@ class _MathParser:
         self._expect(")")
         known = [a[0] for a in args if a[0] is not None]
         exact = all(a[1] for a in args)
+        if any(math.isnan(v) for v in known):
+            return math.nan, True
         if name == "calc":
             if len(args) != 1:
                 raise _Bail
@@ -516,23 +559,30 @@ class _MathParser:
         return _UNKNOWN
 
 
-def _math_value(value: str, em: float | None) -> float | None:
-    """The value (or an upper bound) of a constant math function, ``None`` if not one."""
-    if value.split("(", 1)[0].strip() not in _MATH_FUNCTIONS or not value.endswith(")"):
+def _math_value(value: str, em: float | None, percent: float | None = None) -> float | None:
+    """The value (or an upper bound) of a constant math function, ``None`` if not understood.
+
+    A function other than ``var()``/``env()`` that is not implemented, a non-finite result and
+    nesting past the limit fail closed: ``-inf``, below every hiding threshold.
+    """
+    name = _function_name(value)
+    if name is None or name in _UNKNOWN_FUNCTIONS:
         return None
+    if name not in _MATH_FUNCTIONS:
+        return _DEEP
     tokens = _math_tokens(value)
     if tokens is None:
         return None
-    parser = _MathParser(tokens, em)
+    parser = _MathParser(tokens, em, percent)
     try:
         result = parser.total(0)
-    except _TooDeep:
+    except _FailClosed:
         return _DEEP
     except _Bail:
         return None
     if not parser.done() or result[0] is None:
         return None
-    return _DEEP if result[0] != result[0] else result[0]
+    return result[0] if math.isfinite(result[0]) else _DEEP
 
 
 _STRICT_LENGTH: Final = re.compile(r"(?:\d+(?:\.\d+)?|\.\d+)(?:e[+-]?\d+)?[a-z]+")
@@ -560,6 +610,19 @@ def _font_size(value: str) -> Flag | None:
     return _size_flag(value) if value else None
 
 
+def _before_slash(token: str) -> str:
+    """The part of a shorthand token before a ``/`` outside parentheses."""
+    depth = 0
+    for index, char in enumerate(token):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(depth - 1, 0)
+        elif char == "/" and depth == 0:
+            return token[:index]
+    return token
+
+
 def _is_size(head: str) -> bool:
     number = _number(head)
     return head in _SIZE_KEYWORDS or (number is not None and bool(number[1] or number[0] == 0))
@@ -576,14 +639,15 @@ def _shorthand_size(value: str) -> Flag | None:
     if not value:
         return None
     tiny = any(
-        _is_size(head) and _size_flag(head) is Flag.ON
-        for head in (token.split("/", 1)[0] for token in _tokens(value))
+        (_is_size(head) or _function_name(head) is not None) and _size_flag(head) is Flag.ON
+        for head in map(_before_slash, _tokens(value))
     )
     return Flag.ON if tiny else Flag.INHERIT
 
 
 def _visibility(value: str) -> Flag:
-    if value in ("hidden", "collapse"):
+    name = _function_name(value)
+    if value in ("hidden", "collapse") or (name is not None and name not in _UNKNOWN_FUNCTIONS):
         return Flag.ON
     return Flag.OFF if value in ("visible", "initial") else Flag.INHERIT
 
@@ -601,7 +665,7 @@ def _transparent(value: str) -> bool:
     number = _number(value)
     if number is not None:
         return number[0] / (100 if number[1] == "%" else 1) < _ALPHA_STEP
-    constant = _math_value(value, None)
+    constant = _math_value(value, None, 0.01)
     return constant is not None and constant < _ALPHA_STEP
 
 

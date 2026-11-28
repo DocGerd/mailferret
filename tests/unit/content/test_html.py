@@ -203,6 +203,28 @@ HIDDEN_VECTORS = {
     "offset_exponent": '<span style="position:absolute;left:-1e9px">{c}</span>',
     "offset_calc": '<span style="position:absolute;left:calc(0px - 9999px)">{c}</span>',
     "indent_min": '<p style="text-indent:min(-5000px,1px)">{c}</p>',
+    "size_calc_divide_zero": '<span style="font-size:calc(0px / 0)">{c}</span>',
+    "opacity_calc_divide_zero": '<span style="opacity:calc(0/0)">{c}</span>',
+    "opacity_calc_nan": '<span style="opacity:calc(nan)">{c}</span>',
+    "opacity_calc_percent": '<span style="opacity:calc(0%)">{c}</span>',
+    "opacity_calc_small_percent": '<span style="opacity:calc(0.2%)">{c}</span>',
+    "size_min_nan_second": '<span style="font-size:min(20px, nan * 1px)">{c}</span>',
+    "opacity_min_percent": '<span style="opacity:min(0%,1)">{c}</span>',
+    "size_calc_nan": '<span style="font-size:calc(0px * nan)">{c}</span>',
+    "size_calc_infinity": '<span style="font-size:calc(-infinity * 1px)">{c}</span>',
+    "offset_calc_infinity": (
+        '<span style="position:absolute;left:calc(-infinity * 1px)">{c}</span>'
+    ),
+    "size_webkit_calc": '<span style="font-size:-webkit-calc(0px)">{c}</span>',
+    "size_moz_calc": '<span style="font-size:-moz-calc(0px)">{c}</span>',
+    "size_round": '<span style="font-size:round(0.4px,1px)">{c}</span>',
+    "size_abs": '<span style="font-size:abs(0px)">{c}</span>',
+    "opacity_sin": '<span style="opacity:sin(0)">{c}</span>',
+    "opacity_round": '<span style="opacity:round(0.2)">{c}</span>',
+    "opacity_abs": '<span style="opacity:abs(0)">{c}</span>',
+    "font_shorthand_calc_zero": '<span style="font:calc(0px) a">{c}</span>',
+    "font_shorthand_unknown_function": '<span style="font:round(1px) a">{c}</span>',
+    "visibility_unknown_function": '<span style="visibility:round(1px)">{c}</span>',
     "size_calc_zero": '<span style="font-size:calc(0px)">{c}</span>',
     "size_min": '<span style="font-size:min(0px,12px)">{c}</span>',
     "size_min_unknown": '<span style="font-size:min(0px,var(--x))">{c}</span>',
@@ -346,6 +368,18 @@ def test_hidden_vector_is_removed(name: str) -> None:
         '<span style="font-size:1em">{c}</span>',
         '<span style="font-size:1ex">{c}</span>',
         '<span style="font-size:calc(12px)">{c}</span>',
+        '<span style="font-size:clamp(14px,2vw,18px)">{c}</span>',
+        '<span style="font-size:calc(1em+2px)">{c}</span>',
+        '<span style="font-size:var(--s)">{c}</span>',
+        '<span style="font-size:-webkit-calc(12px)">{c}</span>',
+        '<span style="font:calc(12px) a">{c}</span>',
+        '<span style="font:clamp(14px,2vw,18px) Arial">{c}</span>',
+        '<span style="visibility:var(--v)">{c}</span>',
+        '<span style="opacity:var(--o)">{c}</span>',
+        '<span style="opacity:calc(50%)">{c}</span>',
+        '<span style="opacity:calc(0.5)">{c}</span>',
+        '<span style="position:absolute;left:var(--x)">{c}</span>',
+        '<span style="font-size:calc(min(0px, var(--x)) * -1)">{c}</span>',
         '<span style="font-size:max(12px,0px)">{c}</span>',
         '<span style="font-size:clamp(10px,1em,20px)">{c}</span>',
         '<span style="font-size:calc(1em + 2px)">{c}</span>',
@@ -902,6 +936,40 @@ def test_fuzz_constant_math_hides_exactly_below_the_thresholds(expr: tuple[str, 
     assert (size.text == "") == (value <= 4 / 3)
     offset = html_to_text(f'<span style="position:absolute;left:calc({text})">{CANARY}</span>')
     assert (offset.text == "") == (value <= -1000)
+
+
+_FUNCTION_NAMES = st.one_of(
+    st.sampled_from(
+        ["round", "abs", "sign", "sin", "cos", "tan", "mod", "rem", "pow", "hypot", "log", "exp"]
+    ),
+    st.from_regex(r"[a-z][a-z0-9]{0,8}", fullmatch=True).filter(
+        lambda name: name not in {"calc", "min", "max", "clamp", "var", "env"}
+    ),
+)
+_HIDING_DECLARATIONS = [
+    "font-size:{f}",
+    "font:{f} a",
+    "opacity:{f}",
+    "visibility:{f}",
+    "position:absolute;left:{f}",
+    "text-indent:{f}",
+]
+
+
+@FUZZ
+@given(
+    _FUNCTION_NAMES,
+    st.sampled_from(["0", "1px", "0.5", "50%", "1, 2", "calc(1px)"]),
+    st.sampled_from(_HIDING_DECLARATIONS),
+    st.sampled_from(["", "-webkit-"]),
+)
+def test_fuzz_unknown_function_in_a_hiding_property_fails_closed(
+    name: str, arguments: str, declaration: str, prefix: str
+) -> None:
+    css = declaration.replace("{f}", f"{prefix}{name}({arguments})")
+    result = html_to_text(f'<p>a</p><span style="{css}">{CANARY}</span>')
+    assert result.text == "a"
+    assert NOTE_HIDDEN in result.notes
 
 
 @FUZZ
