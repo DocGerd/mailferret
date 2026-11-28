@@ -24,7 +24,7 @@ Phase: 2a done (scaffold F0, spikes V1–V4) and the architecture update that fo
   - P3: whether P3 still needs D0 now that evals use MCP mocks (PLAN P3).
   - Confirm the proposed ceilings (SECURITY §5): `L-26` (D2), `L-27` (B4), `L-28` and `L-29` (B5). They are coded in `limits.py` at the proposed values, still awaiting confirmation. Confirm the `L-20` line allowance in the `L-26` total, which keeps default FETCH batches well below `L-25` (D2, D5; A§2.2). Set the `L-26` per-line overhead constant from a `tracemalloc` measurement on every minor (D2; A§2.2).
 - Verification owned by agent tasks (ARCHITECTURE §10): item 7, the `gpg2`/`GPG_AGENT_INFO` branch warm and expired (B5); items 17 and 18 (P2 `--strict`; P3 runtime); item 23, the job object and the keyring probe on Windows and macOS (B4, B5); item 24, no server starts in an eval run (P3).
-- C4: research and run the Windows job-object and macOS `RLIMIT_AS` PDF worker memory caps on windows and macos CI runners, plus the cyclic page-tree and 100,000-page bombs (A§10 item 10). Until then T-06 scopes the memory guarantee to Linux.
+- C4 (done, PR #40): Windows job-object cap enforced and macOS `RLIMIT_AS` refused (wall time plus caps, noted per result), both observed on CI; bombs run on every OS. Open for D6/C3: the registry's HTML slot (`unsupported` until C3) and a shared `Cf` stripper in place of the registry's local one.
 - Manual checks only a user can run: ARCHITECTURE §10 items 5, 7 (the client- or `wsl.exe`-launched part), 9, 14, 19, 21 and 22.
 - Task-owner notes from the architecture-update review: issue #14 (D2, D5, B4, B5, C4, E3, P3).
 - Task-owner notes from the B1, B3, B7, C0, D0, B2, B6, F1, D4, D1, C1 and B4 reviews: also issue #14.
