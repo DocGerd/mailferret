@@ -639,6 +639,7 @@ def test_stripped_flag_reports_removed_format_controls() -> None:
     assert not decode_header_value("ab\r\n c").stripped
     assert decode_parameters([("filename", "a​b")]).stripped
     assert decode_parameters([("filename*", "utf-8''a%E2%80%AEb")]).stripped
+    assert decode_parameters([("filename", "=?utf-8?B?4oCu?=x")]).stripped
     assert not decode_parameters([("filename", "ab")]).stripped
     assert parse_header_parameters("attachment; filename=a​b").stripped
     assert parse_header_parameters("a​b; x=1").stripped
