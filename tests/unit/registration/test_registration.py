@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -166,6 +167,15 @@ def test_backup_names_do_not_collide(tmp_path: Path) -> None:
     backup_file(cfg)
     backup_file(cfg)
     assert len(_backups(cfg)) == 2
+
+
+def test_backup_names_do_not_collide_within_one_clock_tick(tmp_path: Path) -> None:
+    cfg = tmp_path / "c.json"
+    cfg.write_text("{}")
+    tick = datetime(2026, 1, 1, tzinfo=UTC)
+    names = {backup_file(cfg, now=tick).name for _ in range(3)}
+    assert len(names) == 3
+    assert len(_backups(cfg)) == 3
 
 
 def test_claude_code_scope_files(tmp_path: Path) -> None:
