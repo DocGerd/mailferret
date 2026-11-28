@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from mailferret.imap import TlsMode, build_context, connect, parse_capabilities
+from mailferret.imap import TlsMode, build_context, parse_capabilities
+from mailferret.imap import connect as _connect
+from mailferret.limits import Limits
 from tests.conftest import tls_material_or_skip
 from tests.support.imap_fake import FakeImapServer, TlsMaterial
 from tests.support.imap_fake.tls import _find_openssl
@@ -91,6 +93,10 @@ def test_ca_file_extends_system_store_instead_of_replacing_it(
     monkeypatch.delenv("SSL_CERT_DIR", raising=False)
     for server_material in (tls_material, system):
         with FakeImapServer(tls=server_material, implicit_tls=True) as server:
-            connect(
-                "127.0.0.1", server.port, TlsMode.IMPLICIT, ca_file=tls_material.cert_file
+            _connect(
+                "127.0.0.1",
+                server.port,
+                TlsMode.IMPLICIT,
+                ca_file=tls_material.cert_file,
+                limits=Limits(),
             ).close()
