@@ -41,7 +41,7 @@ def _refused(server: FakeImapServer, tls: TlsMaterial, mode: TlsMode = TlsMode.I
 
 
 @pytest.mark.parametrize(
-    "name", ["_new_tag", "send", "_command", "read", "readline", "_command_complete"]
+    "name", ["_new_tag", "send", "_command", "read", "readline", "_command_complete", "_log"]
 )
 def test_a_missing_imaplib_hook_refuses_to_connect(
     name: str, server: FakeImapServer, tls_material: TlsMaterial, monkeypatch: pytest.MonkeyPatch
@@ -52,7 +52,7 @@ def test_a_missing_imaplib_hook_refuses_to_connect(
 
 
 @pytest.mark.parametrize(
-    "name", ["_new_tag", "send", "_command", "read", "readline", "_command_complete"]
+    "name", ["_new_tag", "send", "_command", "read", "readline", "_command_complete", "_log"]
 )
 def test_a_reshaped_imaplib_hook_refuses_to_connect(
     name: str, server: FakeImapServer, tls_material: TlsMaterial, monkeypatch: pytest.MonkeyPatch
