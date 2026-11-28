@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
 import traceback
 from collections.abc import Iterator
 from typing import Any
 
 import pytest
+from imapclient.exceptions import IMAPClientError
 
 from mailferret.imap import (
     CommandRejected,
     ConnectionDropped,
+    DeadlineExceeded,
+    LoginRejected,
+    ReadOnlyViolation,
+    ServerError,
     SessionError,
     SessionTimeout,
 )
@@ -130,7 +136,6 @@ def test_a_warning_pin_would_leak_so_the_pin_is_what_holds(
     logger.propagate = False
     logger.handlers[:] = []
     logging.getLogger("imapclient.imaplib").propagate = True
-    logger.setLevel(logging.DEBUG)
     _drive(session)
     captured = capfd.readouterr()
     assert _imapclient_records(records) or captured.err
@@ -185,4 +190,63 @@ def test_an_l12_read_timeout_is_a_timeout_not_a_drop(
     session = opener(server, Limits(imap_read_seconds=1))
     with pytest.raises(SessionTimeout):
         session.noop()
+    assert not session.usable
+
+
+def test_expire_during_a_stall_is_the_deadline_not_a_drop(
+    server: FakeImapServer, opener: Opener
+) -> None:
+    """The mark comes first: EOF after the shutdown must not look like a reconnectable drop."""
+    server.on("NOOP", [Stall()])
+    session = opener(server)
+    timer = threading.Timer(0.5, session.expire)
+    timer.start()
+    watchdog = threading.Timer(8.0, session.close)
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        with pytest.raises(DeadlineExceeded):
+            session.noop()
+    finally:
+        timer.cancel()
+        watchdog.cancel()
+    assert not session.usable
+
+
+def test_expire_keeps_the_tls_object_attached_so_no_send_can_fall_back_to_cleartext(
+    server: FakeImapServer, opener: Opener
+) -> None:
+    session = opener(server)
+    sock = session._imap.sock
+    assert sock._sslobj is not None
+    session.expire()
+    assert sock._sslobj is not None
+    with pytest.raises(ReadOnlyViolation):
+        session._imap.send(b"A1 NOOP\r\n")
+
+
+def test_a_stale_completion_is_not_read_as_the_next_failure(
+    server: FakeImapServer, opener: Opener
+) -> None:
+    """A call that fails before any command is armed must not inherit the previous NO."""
+    server.on("EXAMINE", ["{tag} NO nope\r\n"], once=True)
+    session = opener(server)
+    session.login("user@example.com", "pw")
+    with pytest.raises(CommandRejected):
+        session.examine("Nope")
+    with pytest.raises(TypeError):
+        session.search("ALL")  # type: ignore[arg-type]
+    with pytest.raises(ServerError) as err:
+        session._run(None, lambda c: (_ for _ in ()).throw(IMAPClientError("before any command")))
+    assert err.value.session_usable
+    assert not isinstance(err.value, CommandRejected)
+
+
+def test_a_tagged_no_to_login_is_a_login_rejection_and_discards_the_session(
+    server: FakeImapServer, opener: Opener
+) -> None:
+    server.on("LOGIN", ["{tag} NO bad credentials\r\n"])
+    session = opener(server)
+    with pytest.raises(LoginRejected):
+        session.login("user@example.com", "pw")
     assert not session.usable

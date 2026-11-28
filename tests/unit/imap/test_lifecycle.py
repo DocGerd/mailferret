@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -10,10 +11,12 @@ from typing import Any
 import pytest
 
 from mailferret.imap import (
+    ConnectError,
     ConnectionDropped,
     DeadlineExceeded,
     LimitBreach,
     LiteralItem,
+    LoginRejected,
     ReadOnlySession,
     ReadOnlyViolation,
     ServerError,
@@ -288,3 +291,63 @@ def test_calls_on_one_account_do_not_overlap(server: FakeImapServer, pool_for: P
         t.join(20)
     assert not any(overlap)
     assert server.connections == 1
+
+
+@pytest.mark.parametrize("completion", ["NO", "BAD"])
+def test_a_rejected_login_is_one_login_discards_the_session_and_is_not_retried(
+    tls_material: TlsMaterial, pool_for: Pool, completion: str
+) -> None:
+    with FakeImapServer(tls=tls_material, implicit_tls=True, capabilities=CAPS) as server:
+        server.on("LOGIN", ["{tag} " + completion + " nope\r\n"])
+        pool = pool_for(server)
+        with pytest.raises(LoginRejected):
+            pool.call(lambda s: s.noop())
+        assert (server.connections, _logins(server)) == (1, 1)
+        assert pool._session is None
+
+
+def test_an_l11_connect_timeout_is_one_attempt_and_no_login(
+    tls_material: TlsMaterial, pool_for: Pool
+) -> None:
+    with socket.create_server((HOST, 0)) as silent:
+        port = silent.getsockname()[1]
+        limits = Limits(imap_connect_seconds=1)
+        attempts: list[int] = []
+
+        def open_session() -> ReadOnlySession:
+            attempts.append(1)
+            return connect(
+                HOST, port, TlsMode.IMPLICIT, ca_file=tls_material.cert_file, limits=limits
+            )
+
+        logins: list[int] = []
+        pool = AccountSession(open_session, lambda s: logins.append(1), limits)
+        with pytest.raises(ConnectError) as err:
+            pool.call(lambda s: s.noop())
+        assert err.value.code == "timeout"
+        assert (len(attempts), len(logins)) == (1, 0)
+
+
+def test_a_drop_raised_from_the_authenticator_is_a_login_phase_failure_not_a_retry(
+    server: FakeImapServer, tls_material: TlsMaterial
+) -> None:
+    attempts: list[int] = []
+
+    def drop(session: ReadOnlySession) -> None:
+        attempts.append(1)
+        raise ConnectionDropped
+
+    limits = Limits()
+    pool = AccountSession(
+        lambda: connect(
+            HOST, server.port, TlsMode.IMPLICIT, ca_file=tls_material.cert_file, limits=limits
+        ),
+        drop,
+        limits,
+    )
+    try:
+        with pytest.raises(ServerError):
+            pool.call(lambda s: s.noop())
+    finally:
+        pool.close()
+    assert (server.connections, len(attempts)) == (1, 1)

@@ -25,7 +25,9 @@ from tests.unit.imap.conftest import Opener
 from tests.unit.imap.support import arm, make_sink
 
 OK = "{tag} OK done\r\n"
-AMPLIFICATION_BUDGET = 40
+# Worst measured ratio of peak traced bytes to the total (nested tokens), times a margin of 1.5.
+MEASURED_AMPLIFICATION = 27.6
+AMPLIFICATION_BUDGET = MEASURED_AMPLIFICATION * 1.5
 
 
 def _logged_in(server: FakeImapServer, opener: Opener, limits: Limits | None = None) -> Any:
