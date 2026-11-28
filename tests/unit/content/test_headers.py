@@ -466,3 +466,17 @@ def test_errors_carry_no_input() -> None:
     with pytest.raises(ValueError) as info:
         truncate_chars(marker, -1)
     assert marker not in str(info.value)
+
+
+def test_l05_bounds_the_work_for_many_large_continuations() -> None:
+    limits = Limits()
+    value = "b" * limits.max_header_bytes
+    pairs = ((f"filename*{i}", value) for i in range(200))
+    tracemalloc.start()
+    try:
+        result = decode_parameters(pairs, limits)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert result.truncated
+    assert peak < 16 * limits.max_header_bytes
