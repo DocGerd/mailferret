@@ -128,6 +128,17 @@ class GuardMixin(imaplib.IMAP4):
         if self.debug != 0:
             self._bypassed("debug")
 
+    def _log(self, line: str) -> None:
+        """imaplib's ring of the last ten command and response lines, a LOGIN included (T-02).
+
+        Kept in ``_cmd_log`` whatever ``debug`` says; this session keeps nothing.
+        """
+
+    def clear_command_log(self) -> None:
+        log = getattr(self, "_cmd_log", None)
+        if isinstance(log, dict):
+            log.clear()
+
     def _publish(self, sock: socket.socket) -> socket.socket:
         """Hand the fresh socket to the `L-13` deadline; it is closed unused if refused."""
         if self._handle is not None:
