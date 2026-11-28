@@ -46,6 +46,8 @@ CEILINGS: Final[Mapping[str, int]] = MappingProxyType(
         "keyring_probe_seconds": 10,
         "credential_stderr_bytes": 16 * KIB,
         "credential_status_bytes": 16 * KIB,
+        "max_header_values": 16,
+        "max_header_addresses": 64,
     }
 )
 
@@ -99,6 +101,8 @@ class Limits(BaseModel):
     keyring_probe_seconds: int = CEILINGS["keyring_probe_seconds"]
     credential_stderr_bytes: int = CEILINGS["credential_stderr_bytes"]
     credential_status_bytes: int = CEILINGS["credential_status_bytes"]
+    max_header_values: int = CEILINGS["max_header_values"]
+    max_header_addresses: int = CEILINGS["max_header_addresses"]
 
     @model_validator(mode="after")
     def _within_ceilings(self) -> Self:
