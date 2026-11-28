@@ -39,7 +39,9 @@ RAW_VERBS: Final = frozenset({"SEARCH", "SORT", "THREAD"})
 
 CRLF: Final = b"\r\n"
 _ILLEGAL = re.compile(rb"[\x00-\x08\x0a-\x1f\x7f-\xff]")
-_ANNOUNCEMENT = re.compile(rb"\{(\d{1,10})(\+?)\}\Z")
+_ANNOUNCEMENT = re.compile(rb"\{([0-9]+)(\+?)\}\Z")
+_PENDING = re.compile(rb"\{[0-9]*\+?\}?")
+_MAX_ANNOUNCED_DIGITS = 10
 _VERB = re.compile(rb"(?:(UID) )?([A-Za-z]+)(?= |\Z)", re.IGNORECASE)
 
 _FIELD = rb"""(?:[A-Za-z0-9!#$&'+\-./;<=>?@^_`|~]+|"(?:[^"\\\x00-\x1f\x7f-\xff]|\\["\\])*")"""
@@ -85,13 +87,28 @@ def split_line(data: bytes) -> Line:
 
 
 def announcement(tail: bytes) -> int | None:
-    """The size of a literal announced at the end of ``tail``; ``{n+}`` is always refused."""
+    """The size of a literal announced at the end of ``tail``; ``{n+}`` is always refused.
+
+    Any digit run counts, leading zeros and over-long ones included: a server reads them as a
+    literal, so the gate must too. ``tail`` is the whole unterminated line, see ``pending``.
+    """
     match = _ANNOUNCEMENT.search(tail)
     if match is None:
         return None
     if match.group(2):
         raise ReadOnlyViolation("literal_plus_refused")
-    return int(match.group(1))
+    digits = match.group(1).lstrip(b"0") or b"0"
+    if len(digits) > _MAX_ANNOUNCED_DIGITS:
+        raise ReadOnlyViolation("literal_length_mismatch")
+    return int(digits)
+
+
+def pending(content: bytes) -> bytes:
+    """The part of an unterminated line that a later fragment could turn into an announcement."""
+    start = content.rfind(b"{")
+    if start < 0 or _PENDING.fullmatch(content, start) is None:
+        return b""
+    return content[start:]
 
 
 def parse_armed(data: bytes, tag: bytes) -> Command:

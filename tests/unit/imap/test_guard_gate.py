@@ -436,3 +436,70 @@ def test_command_gives_a_clearer_error_but_is_not_the_guard() -> None:
     other = make_sink()
     with pytest.raises(ReadOnlyViolation):
         other._command("UID", "STORE", "1")
+
+
+_ZEROS = b"0" * 40
+_PLUS_FORMS = [
+    b"{5+}",
+    b"{05+}",
+    b"{00000000005+}",
+    b"{" + _ZEROS + b"5+}",
+    b"{" + b"0" * 5000 + b"5+}",
+    b"{" + b"9" * 5000 + b"+}",
+]
+
+
+@pytest.mark.parametrize("announcement", _PLUS_FORMS)
+def test_every_non_synchronising_announcement_is_refused_whatever_its_digits(
+    announcement: bytes,
+) -> None:
+    armed = make_sink()
+    tag = arm(armed)
+    _denied(
+        armed, line(tag, b"UID SEARCH TEXT " + announcement + CRLF), reason="literal_plus_refused"
+    )
+    fragment = make_sink()
+    tag = arm(fragment)
+    fragment.send(line(tag, b"UID SEARCH TEXT"))
+    fragment.send(b" ")
+    _denied(fragment, announcement + CRLF, reason="literal_plus_refused")
+
+
+@pytest.mark.parametrize("announcement", _PLUS_FORMS)
+def test_a_plus_announcement_split_across_many_sends_is_refused(announcement: bytes) -> None:
+    imap = make_sink()
+    tag = arm(imap)
+    imap.send(line(tag, b"UID SEARCH TEXT x"))
+    pieces = [announcement[i : i + 7] for i in range(0, len(announcement), 7)]
+    for piece in pieces:
+        imap.send(piece)
+    _denied(imap, CRLF, reason="literal_plus_refused")
+    assert CRLF not in b"".join(imap.sent)
+
+
+def test_a_leading_zero_sync_announcement_is_the_literal_it_says() -> None:
+    imap = make_sink(incoming=[b"+ go\r\n"])
+    tag = arm(imap)
+    imap.send(line(tag, b"UID SEARCH TEXT"))
+    imap.send(b" {" + _ZEROS + b"5}\r\n")
+    _denied(imap, b"abcde", reason="literal_before_continuation")
+    imap._mf.dead = False
+    imap.readline()
+    imap.send(b"abcde")
+
+
+@pytest.mark.parametrize("digits", [b"1" + b"0" * 10, b"9" * 5000])
+def test_a_sync_announcement_too_large_to_be_real_is_refused_not_a_crash(digits: bytes) -> None:
+    imap = make_sink()
+    tag = arm(imap)
+    imap.send(line(tag, b"UID SEARCH TEXT"))
+    _denied(imap, b" {" + digits + b"}\r\n", reason="literal_length_mismatch")
+    assert imap.discarded
+
+
+def test_a_brace_that_is_not_at_the_line_end_is_not_an_announcement() -> None:
+    imap = make_sink()
+    tag = arm(imap)
+    imap.send(line(tag, b"UID SEARCH TEXT {5+}x"))
+    imap.send(b"{5+} ")
+    imap.send(CRLF)
