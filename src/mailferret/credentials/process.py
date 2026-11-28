@@ -16,10 +16,12 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, Literal
+from typing import Any, Literal
 
 from mailferret.credentials.errors import CredentialBackendError
 from mailferret.credentials.jobobject import JobObject
+
+_USE_JOB = sys.platform == "win32"
 
 Status = Literal["exited", "timeout", "limit_exceeded"]
 
@@ -59,8 +61,10 @@ def session_env_names() -> tuple[str, ...]:
 
 
 class _Reader:
+    """Reads its own duplicate of the pipe fd, which only this thread closes."""
+
     def __init__(self, fd: int, cap: int, *, truncate: bool) -> None:
-        self._fd = fd
+        self._fd = os.dup(fd)
         self._cap = cap
         self._truncate = truncate
         self.data = bytearray()
@@ -70,6 +74,13 @@ class _Reader:
         self.thread = threading.Thread(target=self._run, daemon=True)
 
     def _run(self) -> None:
+        try:
+            self._loop()
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(self._fd)
+
+    def _loop(self) -> None:
         while not self.stop.is_set():
             try:
                 chunk = os.read(self._fd, _CHUNK)
@@ -87,13 +98,16 @@ class _Reader:
                 return
 
 
-def _write_all(fd: int, data: bytes, stdin: IO[bytes]) -> None:
+def _write_all(fd: int, data: bytes) -> None:
+    """Write on an owned duplicate and close it, which is what ends the child's stdin."""
     view = memoryview(data)
-    with contextlib.suppress(OSError):
-        while view:
-            view = view[os.write(fd, view) :]
-    with contextlib.suppress(OSError):
-        stdin.close()
+    try:
+        with contextlib.suppress(OSError):
+            while view:
+                view = view[os.write(fd, view) :]
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
 
 
 def _kill(proc: subprocess.Popen[bytes], job: JobObject | None) -> None:
@@ -104,6 +118,18 @@ def _kill(proc: subprocess.Popen[bytes], job: JobObject | None) -> None:
             os.killpg(proc.pid, signal.SIGKILL)
     with contextlib.suppress(OSError):
         proc.kill()
+
+
+def _has_exited(proc: subprocess.Popen[bytes]) -> bool:
+    """Detect exit without reaping where possible, so ``killpg`` never meets a recycled group."""
+    waitid: Any = getattr(os, "waitid", None)
+    if waitid is None:
+        return proc.poll() is not None
+    flags = os.WEXITED | os.WNOHANG | os.WNOWAIT  # type: ignore[attr-defined,unused-ignore]
+    try:
+        return waitid(os.P_PID, proc.pid, flags) is not None  # type: ignore[attr-defined,unused-ignore]
+    except ChildProcessError:
+        return True
 
 
 def _spawn(
@@ -141,6 +167,31 @@ def _spawn(
         raise CredentialBackendError from None
 
 
+def _close_pipes(proc: subprocess.Popen[bytes]) -> None:
+    for pipe in (proc.stdout, proc.stderr, proc.stdin):
+        if pipe is not None:
+            with contextlib.suppress(OSError):
+                pipe.close()
+
+
+def _start_io(
+    proc: subprocess.Popen[bytes], stdout_cap: int, stderr_cap: int, stdin_data: bytes | None
+) -> tuple[_Reader, _Reader]:
+    if proc.stdout is None or proc.stderr is None:
+        raise ValueError("pipes")
+    out = _Reader(proc.stdout.fileno(), stdout_cap, truncate=False)
+    err = _Reader(proc.stderr.fileno(), stderr_cap, truncate=True)
+    writer_fd: int | None = None
+    if stdin_data is not None and proc.stdin is not None:
+        writer_fd = os.dup(proc.stdin.fileno())
+        proc.stdin.close()
+    out.thread.start()
+    err.thread.start()
+    if writer_fd is not None and stdin_data is not None:
+        threading.Thread(target=_write_all, args=(writer_fd, stdin_data), daemon=True).start()
+    return out, err
+
+
 def run_bounded(
     argv: Sequence[str],
     *,
@@ -160,30 +211,28 @@ def run_bounded(
     end = time.monotonic() + deadline
     proc = _spawn(argv, env, cwd, stdin_pipe=stdin_data is not None)
     job: JobObject | None = None
-    if sys.platform == "win32":
+    if _USE_JOB:
         job = JobObject.create()
-        if job is not None and not job.assign(int(getattr(proc, "_handle", 0))):
-            job.close()
-            job = None
-    if proc.stdout is None or proc.stderr is None:
+        if job is None or not job.assign(int(getattr(proc, "_handle", 0))):
+            if job is not None:
+                job.close()
+            _kill(proc, None)
+            _close_pipes(proc)
+            raise CredentialBackendError from None
+    try:
+        readers = _start_io(proc, stdout_cap, stderr_cap, stdin_data)
+    except (OSError, ValueError):
         _kill(proc, job)
+        _close_pipes(proc)
         raise CredentialBackendError from None
-    out = _Reader(proc.stdout.fileno(), stdout_cap, truncate=False)
-    err = _Reader(proc.stderr.fileno(), stderr_cap, truncate=True)
-    readers = (out, err)
-    for reader in readers:
-        reader.thread.start()
-    if stdin_data is not None and proc.stdin is not None:
-        threading.Thread(
-            target=_write_all, args=(proc.stdin.fileno(), stdin_data, proc.stdin), daemon=True
-        ).start()
+    out, err = readers
 
     status: Status = "exited"
     while True:
         if out.breach.is_set():
             status = "limit_exceeded"
             break
-        if proc.poll() is not None:
+        if _has_exited(proc):
             break
         if time.monotonic() >= end:
             status = "timeout"
@@ -198,7 +247,7 @@ def run_bounded(
         elif not all(r.eof.is_set() for r in readers):
             status = "timeout"
 
-    if status != "exited" or proc.poll() is None:
+    if status != "exited":
         _kill(proc, job)
     for reader in readers:
         reader.stop.set()
@@ -209,10 +258,7 @@ def run_bounded(
         returncode: int | None = proc.wait(timeout=_JOIN_GRACE)
     except subprocess.TimeoutExpired:
         returncode = None
-    for pipe in (proc.stdout, proc.stderr, proc.stdin):
-        if pipe is not None:
-            with contextlib.suppress(OSError):
-                pipe.close()
+    _close_pipes(proc)
     if job is not None:
         job.close()
     if status != "exited":
