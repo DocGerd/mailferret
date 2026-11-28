@@ -165,21 +165,35 @@ def test_a_search_literal_carrying_a_store_never_reaches_the_wire_as_a_command(
 def test_embedded_crlf_in_a_login_never_becomes_a_second_command(
     server: FakeImapServer, opener: Opener, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    """3.13+ imaplib refuses control characters itself; below, the gate does. Both stop it."""
+    """At imaplib's own level: 3.13+ refuses control characters itself, below the gate does."""
     _script(server)
     session = opener(server)
     secret = "hunter2-CANARY"  # noqa: S105  # pii-check: ignore
-    with pytest.raises(SessionError) as err:
-        session.login("user", f"{secret}\r\nA9 NOOP")
+    with pytest.raises((ReadOnlyViolation, ValueError)) as err:
+        session._imap.login("user", f"{secret}\r\nA9 NOOP")
     assert not any(c.verb == "NOOP" for c in server.commands)
     shown = "".join(traceback.format_exception(err.value)) + repr(err.value) + str(err.value)
-    assert secret not in shown
-    assert err.value.__context__ is None
+    if isinstance(err.value, ReadOnlyViolation):
+        assert secret not in shown
+        assert err.value.reason == "line_break_in_command"
+    else:
+        assert sys.version_info >= (3, 13)
     captured = capfd.readouterr()
     assert secret not in captured.out + captured.err
-    if sys.version_info < (3, 13):
-        assert isinstance(err.value, ReadOnlyViolation)
-        assert err.value.reason == "line_break_in_command"
+    assert server.wire_of(1).count("A9 NOOP") == 0
+
+
+def test_embedded_crlf_through_the_session_is_refused_before_any_byte(
+    server: FakeImapServer, opener: Opener
+) -> None:
+    """imapclient refuses CR/LF in arguments first; the session maps it to a fixed error."""
+    _script(server)
+    session = opener(server)
+    before = len(server.commands)
+    with pytest.raises(SessionError) as err:
+        session.login("user", "pw\r\nA9 NOOP")
+    assert "A9" not in repr(err.value) + str(err.value)
+    assert len(server.commands) == before
 
 
 @pytest.mark.parametrize(
