@@ -26,7 +26,6 @@ from mailferret.imap.probe import PreTlsBytes, bytes_pending
 from mailferret.limits import LINE_OVERHEAD_BYTES, Limits
 
 _LITERAL_END: Final = re.compile(rb"\{(\d{1,10})\}\Z")
-_TAIL: Final = 16
 _IN_FLIGHT: Final = frozenset({"open", "await", "literal", "auth"})
 
 
@@ -205,16 +204,16 @@ class GuardMixin(imaplib.IMAP4):
             s.phase, s.literal_left = "await", command.announced
         else:
             s.phase = "closed" if command.terminated else "open"
-            s.tail = data[-_TAIL:]
+            s.tail = grammar.pending(data)
 
     def _vet_fragment(self, data: bytes) -> None:
         """Mid-command shapes of SEARCH, SORT and THREAD: text, a literal announcement, CRLF."""
         s = self._mf
         line = grammar.split_line(data)
         if not line.terminated:
-            s.tail = (s.tail + line.content)[-_TAIL:]
+            s.tail = grammar.pending(s.tail + line.content)
             return
-        announced = grammar.announcement((s.tail + line.content)[-_TAIL:])
+        announced = grammar.announcement(s.tail + line.content)
         if announced is None:
             s.phase = "closed"
         else:
