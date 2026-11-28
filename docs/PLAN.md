@@ -18,7 +18,7 @@ Where a non-MIME task is security-heavy (guard, credentials, TLS), the extra scr
 
 ## 2. Tasks
 
-`Deps` lists tasks that must be merged first. `Threats` are the IDs whose verification the task must implement. The decisions and the ceiling confirmations (`L-20` allowance, `L-26`–`L-29`) left to a task are owned by `docs/STATUS.md` Open.
+`Deps` lists tasks that must be merged first. `Threats` are the IDs whose verification the task must implement. The decisions and the ceiling confirmations (`L-20` allowance) left to a task are owned by `docs/STATUS.md` Open.
 
 ### Phase 2a: scaffold and spikes
 
