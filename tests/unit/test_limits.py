@@ -89,13 +89,26 @@ def test_model_is_frozen() -> None:
 
 @pytest.mark.parametrize(("key", "ceiling"), sorted(CEILINGS.items()))
 def test_merge_lowers_but_never_raises(key: str, ceiling: int) -> None:
-    assert getattr(merge({key: 1}), key) == 1
+    floor = limits.LINE_OVERHEAD_BYTES + Limits().max_line_bytes + 1
+    lowest = floor if key == "max_response_line_bytes" else 1
+    assert getattr(merge({key: lowest}), key) == lowest
     assert getattr(merge({key: ceiling}), key) == ceiling
     for bad in (ceiling + 1, 0, -1):
         with pytest.raises(ValidationError):
             merge({key: bad})
         with pytest.raises(ValidationError):
             Limits(**{key: bad})
+
+
+def test_a_line_total_that_cannot_hold_one_line_is_rejected() -> None:
+    line = Limits().max_line_bytes
+    floor = line + limits.LINE_OVERHEAD_BYTES
+    with pytest.raises(ValidationError, match="max_response_line_bytes"):
+        merge({"max_response_line_bytes": floor})
+    assert merge({"max_response_line_bytes": floor + 1}).max_response_line_bytes == floor + 1
+    with pytest.raises(ValidationError, match="max_response_line_bytes"):
+        merge({"max_response_line_bytes": floor - 1, "max_line_bytes": line})
+    assert merge({"max_line_bytes": 1024, "max_response_line_bytes": 2048})
 
 
 def test_merge_ignores_none_and_rejects_unknown_and_non_int() -> None:
