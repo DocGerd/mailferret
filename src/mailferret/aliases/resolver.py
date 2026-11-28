@@ -55,6 +55,40 @@ def _text(value: str | bytes, limits: Limits) -> tuple[str, bool]:
     return text, cut
 
 
+def _split_top_level(text: str) -> list[str]:
+    """Split on commas outside quoted strings, comments and angle brackets (linear)."""
+    pieces: list[str] = []
+    start = 0
+    quoted = False
+    angle = False
+    depth = 0
+    escaped = False
+    for index, char in enumerate(text):
+        if escaped:
+            escaped = False
+        elif char == "\\" and (quoted or depth):
+            escaped = True
+        elif quoted:
+            quoted = char != '"'
+        elif char == '"' and depth == 0:
+            quoted = True
+        elif char == "(":
+            depth += 1
+        elif char == ")" and depth:
+            depth -= 1
+        elif depth:
+            continue
+        elif char == "<":
+            angle = True
+        elif char == ">":
+            angle = False
+        elif char == "," and not angle:
+            pieces.append(text[start:index])
+            start = index + 1
+    pieces.append(text[start:])
+    return pieces
+
+
 def _parse_value(text: str, cut: bool) -> list[str]:
     """Raw addresses of one value; a malformed fragment costs only itself.
 
@@ -64,7 +98,7 @@ def _parse_value(text: str, cut: bool) -> list[str]:
     """
     pairs = getaddresses([text])
     if any(not addr for _, addr in pairs):
-        pairs = [pair for piece in text.split(",") for pair in getaddresses([piece])]
+        pairs = [pair for piece in _split_top_level(text) for pair in getaddresses([piece])]
     found = [addr for _, addr in pairs if addr]
     return found[:-1] if cut else found
 
