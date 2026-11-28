@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import stat
+import sys
 import tempfile
 from datetime import UTC, datetime
 from enum import Enum
@@ -189,7 +190,7 @@ def merge_server(
         return None
 
     before = path.stat()
-    if os.name == "posix" and (
+    if sys.platform != "win32" and (
         not before.st_mode & stat.S_IWUSR
         or before.st_uid != os.geteuid()
         or not os.access(path, os.W_OK)
