@@ -208,6 +208,11 @@ HIDDEN_VECTORS = {
         '<div style="background-image:linear-gradient(white,white)">'
         '<span style="color:white">{c}</span></div>'
     ),
+    "empty_background_attribute": '<td background="" style="color:#fff">{c}</td>',
+    "blank_background_attribute": '<td background="  " style="color:#fff">{c}</td>',
+    "blank_background_attribute_with_bgcolor": (
+        "<table><tr><td background=' ' bgcolor=#fff><font color=#fff>{c}</font></td></tr></table>"
+    ),
     "fallback_with_background_attribute": (
         '<table><tr><td bgcolor="#fff" background="https://example.com/b.png">'
         '<font color="#fff">{c}</font></td></tr></table>'
@@ -232,6 +237,17 @@ INHERITED_HIDDEN_VECTORS = {
     "size_var": '<span style="font-size:0"><span style="font-size:var(--s)">{c}</span></span>',
     "size_unitless": '<span style="font-size:0"><span style="font-size:12">{c}</span></span>',
     "size_garbage": '<span style="font-size:0"><span style="font-size:bogus">{c}</span></span>',
+    "size_trailing_dot": '<span style="font-size:0"><b style="font-size:12.px">{c}</b></span>',
+    "font_no_family": '<span style="font-size:0"><b style="font:12px">{c}</b></span>',
+    "font_keyword_no_family": '<span style="font-size:0"><b style="font:large">{c}</b></span>',
+    "font_unknown_prefix": '<span style="font-size:0"><b style="font:bogus 12px a">{c}</b></span>',
+    "font_initial_with_family": (
+        '<span style="font-size:0"><b style="font:initial a">{c}</b></span>'
+    ),
+    "font_no_family_line_height": (
+        '<span style="font-size:0"><b style="font:12px/1.5">{c}</b></span>'
+    ),
+    "font_tiny_size_in_invalid_shorthand": '<b style="font:bogus 0 a">{c}</b>',
     "size_sheet_em": ('<style>b{{font-size:1em}}</style><div style="font-size:0"><b>{c}</b></div>'),
     "size_sheet_absolute_then_inline_em": (
         "<style>.a{{font-size:12px}}</style>"
@@ -289,6 +305,9 @@ def test_hidden_vector_is_removed(name: str) -> None:
         '<div style="font-size:0"><span style="font-size:initial">{c}</span></div>',
         '<div style="font-size:0"><span style="font:italic bold 14px/1.5 a">{c}</span></div>',
         '<div style="font-size:0"><span style="font:large a">{c}</span></div>',
+        '<div style="font-size:0"><b style="font:small-caps 700 12px/1.5 A, serif">{c}</b></div>',
+        '<div style="font-size:0"><b style="font:12px / 1.5 Arial">{c}</b></div>',
+        '<div style="font-size:0"><b style="font:initial">{c}</b></div>',
         '<td style="font-size:0"><span style="font-size:12px;font-size:13px">{c}</span></td>',
         '<style>.a{{font-size:12px}}</style><div style="font-size:0"><b class=a>{c}</b></div>',
         '<td background="https://example.com/b.png" style="color:#fff">{c}</td>',
@@ -742,13 +761,44 @@ def _child(css: str, where: str) -> str:
     return f"<style>b{{{css}}}</style><b>{CANARY}</b>"
 
 
+# (template, a complete valid shorthand): only a valid one with an allowlisted size may clear.
+_FONT_SHAPES = [
+    ("{v} a", True),
+    ("italic 700 {v}/1.5 a", True),
+    ("small-caps {v} / 1.5 Arial, serif", True),
+    ("{v}/1.5 'A b'", True),
+    ("{v}", False),
+    ("{v} /1.5", False),
+    ("bogus {v} a", False),
+    ("{v} a 0", False),
+]
+
+
+def _oracle_font_clears(template: str, valid: bool, value: str) -> bool:
+    if template == "{v}":
+        return value == "initial"
+    return valid and value != "initial" and _oracle_size_clears(value)
+
+
 @FUZZ
-@given(_size_values, st.sampled_from(["inline", "sheet"]), st.sampled_from(["font-size", "font"]))
-def test_fuzz_tiny_parent_only_an_allowlisted_size_clears(
-    value: str, where: str, prop: str
+@given(_size_values, st.sampled_from(["inline", "sheet"]), st.sampled_from(_FONT_SHAPES))
+def test_fuzz_tiny_parent_only_a_valid_font_shorthand_clears(
+    value: str, where: str, shape: tuple[str, bool]
 ) -> None:
-    css = f"font-size:{value}" if prop == "font-size" else f"font:{value} a"
+    template, valid = shape
+    css = "font:" + template.replace("{v}", value)
     result = html_to_text(f'<div style="font-size:0">{_child(css, where)}</div>')
+    if _oracle_font_clears(template, valid, value):
+        assert result.text == CANARY
+    else:
+        assert result.text == ""
+        assert NOTE_HIDDEN in result.notes
+
+
+@FUZZ
+@given(_size_values, st.sampled_from(["inline", "sheet"]))
+def test_fuzz_tiny_parent_only_an_allowlisted_size_clears(value: str, where: str) -> None:
+    result = html_to_text(f'<div style="font-size:0">{_child(f"font-size:{value}", where)}</div>')
     if _oracle_size_clears(value):
         assert result.text == CANARY
     else:

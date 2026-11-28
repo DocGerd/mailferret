@@ -290,7 +290,11 @@ def _attribute_style(el: Any) -> Style:
     color = None
     if el.tag == "font" and "color" in attrs:
         color = first_color(normalize(attrs.get("color", "")))
-    return Style(normal=Props(color=color, background=background, image="background" in attrs))
+    return Style(
+        normal=Props(
+            color=color, background=background, image=bool(attrs.get("background", "").strip())
+        )
+    )
 
 
 def _resolve(declared: Flag | None, inherited: bool) -> bool:

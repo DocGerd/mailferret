@@ -352,6 +352,29 @@ _SIZE_KEYWORDS: Final = frozenset(
 )
 
 
+_STRICT_LENGTH: Final = re.compile(r"(?:\d+(?:\.\d+)?|\.\d+)[a-z]+")
+_FONT_PREFIX: Final = frozenset(
+    {
+        "normal",
+        "italic",
+        "oblique",
+        "small-caps",
+        "bold",
+        "bolder",
+        "lighter",
+        "ultra-condensed",
+        "extra-condensed",
+        "condensed",
+        "semi-condensed",
+        "semi-expanded",
+        "expanded",
+        "extra-expanded",
+        "ultra-expanded",
+    }
+)
+_FONT_PREFIX_VALUE: Final = re.compile(r"[1-9]\d{0,2}|1000|-?(?:\d+\.?\d*|\.\d+)deg")
+
+
 def _size_flag(value: str) -> Flag:
     """Classify one size value: only an absolute length or keyword may clear a tiny size."""
     number = _number(value)
@@ -360,7 +383,9 @@ def _size_flag(value: str) -> Flag:
         if size <= 0:
             return Flag.ON
         if unit in _ABSOLUTE_UNITS:
-            return Flag.ON if _tiny(size, unit) else Flag.OFF
+            if _tiny(size, unit):
+                return Flag.ON
+            return Flag.OFF if _STRICT_LENGTH.fullmatch(value.lstrip("+")) else Flag.INHERIT
         return Flag.INHERIT
     return Flag.OFF if value in _SIZE_KEYWORDS else Flag.INHERIT
 
@@ -369,16 +394,42 @@ def _font_size(value: str) -> Flag | None:
     return _size_flag(value) if value else None
 
 
+def _is_size(head: str) -> bool:
+    number = _number(head)
+    return head in _SIZE_KEYWORDS or (number is not None and bool(number[1] or number[0] == 0))
+
+
 def _shorthand_size(value: str) -> Flag | None:
-    """The size inside a ``font`` shorthand: the first ``<size>[/<line-height>]`` token."""
+    """The size of a ``font`` shorthand; only a complete valid one may clear a tiny size.
+
+    Valid is: optional style, variant, weight and stretch words, one size, an optional
+    ``/line-height``, then at least one family token (or ``initial`` alone). Whatever a browser
+    would drop inherits, and a tiny size token anywhere hides.
+    """
     if not value:
         return None
-    for token in _tokens(value):
-        head = token.split("/", 1)[0]
-        number = _number(head)
-        if head in _SIZE_KEYWORDS or (number is not None and (number[1] or number[0] == 0)):
-            return _size_flag(head)
-    return Flag.INHERIT
+    if value == "initial":
+        return Flag.OFF
+    tokens = _tokens(value)
+    heads = [token.split("/", 1)[0] for token in tokens]
+    tiny = any(
+        _is_size(head) and head != "initial" and _size_flag(head) is Flag.ON for head in heads
+    )
+    if tiny:
+        return Flag.ON
+    fallback = Flag.INHERIT
+    for index, head in enumerate(heads):
+        if head in _FONT_PREFIX or _FONT_PREFIX_VALUE.fullmatch(head):
+            continue
+        if head == "initial" or not _is_size(head):
+            return fallback
+        word, rest = tokens[index], tokens[index + 1 :]
+        if word.endswith("/") and word != "/":
+            rest = rest[1:]
+        elif "/" not in word and rest and rest[0].startswith("/"):
+            rest = rest[1:] if rest[0] != "/" else rest[2:]
+        return _size_flag(head) if rest else fallback
+    return fallback
 
 
 def _visibility(value: str) -> Flag:
