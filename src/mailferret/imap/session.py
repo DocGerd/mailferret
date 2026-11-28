@@ -62,15 +62,19 @@ class ReadOnlySession:
         with self._mark:
             self._expired = True
         self._imap.discard()
+        self._shutdown_socket()
+
+    def close(self) -> None:
+        self._imap.discard()
+        self._shutdown_socket()
+        with contextlib.suppress(Exception):
+            self._client.shutdown()
+
+    def _shutdown_socket(self) -> None:
         # Not SSLSocket.shutdown: it detaches the TLS object first, and a concurrent sendall
         # would then fall back to the plain socket and write in the clear.
         with contextlib.suppress(Exception):
             socket.socket.shutdown(self._imap.sock, socket.SHUT_RDWR)
-
-    def close(self) -> None:
-        self._imap.discard()
-        with contextlib.suppress(Exception):
-            self._client.shutdown()
 
     def logout(self) -> None:
         try:
