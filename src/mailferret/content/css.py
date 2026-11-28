@@ -18,10 +18,9 @@ Hiding states inherit through a ``Flag`` allowlist: only a recognised value (an 
 one point, a size keyword, ``visible``, ``initial``) clears an inherited state. Relative sizes,
 ``inherit``, functions, garbage and the whole ``font`` shorthand never do.
 
-``var()`` in a hiding property is resolved from the custom properties of the same element (inline
-and matched rules) or its fallback; ``env()``, an unknown name, a cycle, a missing fallback and
-anything past the depth, count or size caps fail closed (hidden). Custom properties of ancestors
-are not inherited, so a var declared on a parent hides the child (over-hiding, noted).
+Any ``var()`` or ``env()`` in a hiding property fails closed (hidden): the value of a variable
+depends on ancestors, case and rule order, which are not modelled. Layouts built on variables
+over-hide, and the note says so.
 """
 
 from __future__ import annotations
@@ -29,7 +28,6 @@ from __future__ import annotations
 import enum
 import math
 import re
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -108,13 +106,6 @@ def override(base: Flag | None, top: Flag | None) -> Flag | None:
     return top
 
 
-_RANK: Final = {None: 0, Flag.OFF: 1, Flag.INHERIT: 2, Flag.ON: 3}
-
-
-def _worse(first: Flag | None, second: Flag | None) -> Flag | None:
-    return first if _RANK[first] >= _RANK[second] else second
-
-
 @dataclass(frozen=True, slots=True)
 class Props:
     """Inherited properties of one importance level; ``None`` means not declared."""
@@ -124,16 +115,6 @@ class Props:
     color: ColorValue = None  # text colour
     background: ColorValue = None  # the known (fallback) colour, never "transparent"
     image: bool = False  # a background image or gradient
-
-    def combine(self, other: Props) -> Props:
-        """Merge without knowing the order: the more hiding state wins (ON, INHERIT, OFF)."""
-        return Props(
-            _worse(self.tiny, other.tiny),
-            _worse(self.invisible, other.invisible),
-            self.color,
-            self.background,
-            self.image,
-        )
 
     def merge(self, later: Props) -> Props:
         return Props(
@@ -171,16 +152,6 @@ class Style:
             self.empty or later.empty,
             self.normal.merge(later.normal),
             self.important.merge(later.important),
-        )
-
-    def combine(self, other: Style) -> Style:
-        """Add declarations whose place in the cascade is unknown, assuming the worst."""
-        return Style(
-            self.direct or other.direct,
-            self.clipped or other.clipped,
-            self.empty or other.empty,
-            self.normal.combine(other.normal),
-            self.important.combine(other.important),
         )
 
     @property
@@ -813,9 +784,8 @@ def _props(declarations: Declarations) -> Props:
     return Props(tiny, invisible, color, background, image)
 
 
-# --- custom properties --------------------------------------------------------------------------
+# --- variables ---------------------------------------------------------------------------------
 
-_Sources = Sequence[Mapping[str, tuple[str, bool]]]  # custom property: value, !important
 _VARIABLE_PROPERTIES: Final = frozenset(
     {
         "display",
@@ -834,108 +804,24 @@ _VARIABLE_PROPERTIES: Final = frozenset(
 )
 # A value no property can read as visible: functions it does not implement fail closed.
 _FAILED: Final = "fail-closed()"
-_CSS_WIDE: Final = frozenset({"initial", "inherit", "unset", "revert", "revert-layer"})
-_VAR: Final = re.compile(r"(?<![\w-])(var|env)\(")
-_MAX_VAR_DEPTH: Final = 6
-_MAX_VAR_USES: Final = 16
-_MAX_VAR_CHARS: Final = 1024
-_MAX_DEFERRED: Final = 8  # declarations per rule that read a variable; more hides the element
-_MAX_PENDING: Final = 64
-_MAX_CACHE: Final = 4096
 
 
-def _close(text: str, start: int) -> int:
-    """The index of the ``)`` closing a call that opened before ``start`` (end of text closes)."""
-    depth = 1
-    for index in range(start, len(text)):
-        if text[index] == "(":
-            depth += 1
-        elif text[index] == ")":
-            depth -= 1
-            if depth == 0:
-                return index
-    return len(text)
+def _close_variables(declarations: Declarations) -> Declarations:
+    """Make a declaration that reads ``var()`` or ``env()`` in a hiding property fail closed.
 
-
-def _lookup(sources: _Sources, name: str) -> str | None:
-    best: tuple[str, bool] | None = None
-    for source in sources:
-        found = source.get(name)
-        if found is not None and (best is None or found[1] or not best[1]):
-            best = found
-    return None if best is None else best[0]
-
-
-def _substitute(
-    text: str, sources: _Sources, stack: tuple[str, ...], depth: int, budget: list[int]
-) -> str | None:
-    """Replace ``var()`` by its custom property or fallback; ``None`` if that cannot be done.
-
-    ``env()``, an unknown or cyclic name, a missing fallback and anything past the depth, count
-    or size caps all give ``None``, which callers treat as hidden.
+    The value of a variable depends on ancestors, case and rule order, so it is not modelled.
     """
-    if len(text) > _MAX_VAR_CHARS or depth > _MAX_VAR_DEPTH:
-        return None
-    parts: list[str] = []
-    position = 0
-    while True:
-        match = _VAR.search(text, position)
-        if match is None:
-            parts.append(text[position:])
-            return "".join(parts)
-        parts.append(text[position : match.start()])
-        budget[0] -= 1
-        if match.group(1) == "env" or budget[0] < 0:
-            return None
-        close = _close(text, match.end())
-        name, comma, fallback = text[match.end() : close].partition(",")
-        name = name.strip()
-        if not name.startswith("--") or name in stack:
-            return None
-        value = _lookup(sources, name)
-        if value in _CSS_WIDE:
-            return None
-        if value is not None:
-            resolved = _substitute(value, sources, (*stack, name), depth + 1, budget)
-        elif comma:
-            resolved = _substitute(fallback.strip(), sources, stack, depth + 1, budget)
-        else:
-            return None
-        if resolved is None:
-            return None
-        parts.append(resolved)
-        position = close + 1
+    return [
+        (name, _FAILED, important)
+        if name in _VARIABLE_PROPERTIES and ("var(" in value or "env(" in value)
+        else (name, value, important)
+        for name, value, important in declarations
+    ]
 
 
-def _resolve(deferred: Declarations, sources: _Sources) -> Style:
-    """Evaluate declarations that read a variable, a failure becoming ``_FAILED``."""
-    resolved: Declarations = []
-    for name, value, important in deferred:
-        text = _substitute(value, sources, (), 0, [_MAX_VAR_USES])
-        resolved.append((name, _FAILED if text is None else text, important))
-    return _evaluate(resolved)
-
-
-def _split(
-    declarations: Declarations,
-) -> tuple[Declarations, dict[str, tuple[str, bool]], Declarations]:
-    """Separate plain declarations, custom properties and those that read a variable."""
-    plain: Declarations = []
-    custom: dict[str, tuple[str, bool]] = {}
-    deferred: Declarations = []
-    for name, value, important in declarations:
-        if name.startswith("--"):
-            known = custom.get(name)
-            if known is None or important or not known[1]:
-                custom[name] = (value, important)
-        elif name in _VARIABLE_PROPERTIES and ("var(" in value or "env(" in value):
-            deferred.append((name, value, important))
-        else:
-            plain.append((name, value, important))
-    return plain, custom, deferred
-
-
-def _evaluate(declarations: Declarations) -> Style:
+def evaluate(declarations: Declarations) -> Style:
+    """Reduce declarations to a ``Style``; later declarations of a property win per importance."""
+    declarations = _close_variables(declarations)
     direct = clipped = empty = False
     for name, value, _ in declarations:
         if _hides(name, value):
@@ -955,100 +841,87 @@ def _evaluate(declarations: Declarations) -> Style:
     )
 
 
-def evaluate(declarations: Declarations, sources: _Sources = ()) -> Style:
-    """Reduce declarations to a ``Style``; later declarations of a property win per importance.
-
-    A declaration that reads ``var()`` is resolved against the custom properties of these
-    declarations and of ``sources``; if it cannot be, the element is treated as hidden.
-    """
-    plain, custom, deferred = _split(declarations)
-    style = _evaluate(plain)
-    if deferred:
-        style = style.combine(_resolve(deferred, [*sources, custom]))
-    return style
-
-
 # --- stylesheets -----------------------------------------------------------------------------
 
 
+_SPECIFICITY: Final = {"t": 1, "c": 10, "tc": 11, "i": 100}  # by selector kind
+_Key = tuple[str, str]
+# Per selector, the last effect on each inherited property and level: (rule position, value).
+_Entries = dict[tuple[bool, str], tuple[int, Props]]
+
+
+def _single_properties(props: Props) -> list[tuple[str, Props]]:
+    """One ``Props`` per declared property, so each can carry the position of its last rule."""
+    singles: list[tuple[str, Props]] = []
+    if props.tiny is not None:
+        singles.append(("tiny", Props(tiny=props.tiny)))
+    if props.invisible is not None:
+        singles.append(("invisible", Props(invisible=props.invisible)))
+    if props.color is not None:
+        singles.append(("color", Props(color=props.color)))
+    if props.background is not None:
+        singles.append(("background", Props(background=props.background)))
+    if props.image:
+        singles.append(("image", Props(image=True)))
+    return singles
+
+
 class Sheet:
-    """Top-level rules whose selector is one tag, ``.class``, ``#id`` or ``tag.class``."""
+    """Top-level rules whose selector is one tag, ``.class``, ``#id`` or ``tag.class``.
+
+    Matching rules are applied in cascade order: specificity, then position in the sheets (all
+    ``<style>`` elements in document order), never the order of the ``class`` attribute.
+    """
 
     def __init__(self) -> None:
-        self._rules: dict[tuple[str, str], Style] = {}
-        self._custom: dict[tuple[str, str], dict[str, tuple[str, bool]]] = {}
-        self._deferred: dict[tuple[str, str], Declarations] = {}
-        self._cache: dict[tuple[tuple[str, str], ...], Style] = {}
+        self._flags: dict[_Key, Style] = {}
+        self._entries: dict[_Key, _Entries] = {}
+        self.count = 0  # rules seen: the position of the next one
 
-    def add(
-        self,
-        key: tuple[str, str],
-        style: Style,
-        custom: Mapping[str, tuple[str, bool]] | None = None,
-        deferred: Declarations | None = None,
-    ) -> None:
-        known = self._rules.get(key)
-        self._rules[key] = style if known is None else known.merge(style)
-        if custom:
-            target = self._custom.setdefault(key, {})
-            for name, found in custom.items():
-                old = target.get(name)
-                if old is None or found[1] or not old[1]:
-                    target[name] = found
-        if deferred:
-            pending = self._deferred.setdefault(key, [])
-            if len(pending) + len(deferred) > _MAX_DEFERRED:
-                self._rules[key] = self._rules[key].merge(Style(direct=True))
-            else:
-                pending.extend(deferred)
+    def add(self, key: _Key, style: Style, position: int) -> None:
+        known = self._flags.get(key, Style())
+        self._flags[key] = known.merge(Style(style.direct, style.clipped, style.empty))
+        entries = self._entries.setdefault(key, {})
+        for important, props in ((False, style.normal), (True, style.important)):
+            for name, single in _single_properties(props):
+                previous = entries.get((important, name))
+                merged = single if previous is None else previous[1].merge(single)
+                entries[(important, name)] = (position, merged)
 
     def update(self, other: Sheet) -> None:
-        for key, style in other._rules.items():
-            self.add(key, style, other._custom.get(key), other._deferred.get(key))
+        """Append the rules of a later ``<style>`` element."""
+        for key, flags in other._flags.items():
+            self._flags[key] = self._flags.get(key, Style()).merge(flags)
+        for key, entries in other._entries.items():
+            own = self._entries.setdefault(key, {})
+            for slot, (position, props) in entries.items():
+                previous = own.get(slot)
+                merged = props if previous is None else previous[1].merge(props)
+                own[slot] = (position + self.count, merged)
+        self.count += other.count
 
-    def style_for(
-        self,
-        tag: str,
-        classes: list[str],
-        ident: str | None,
-        inline: Declarations | None = None,
-    ) -> Style:
-        """Merge the matching rules and the inline declarations; the sheet is lower-case."""
+    def style_for(self, tag: str, classes: list[str], ident: str | None) -> Style:
+        """Merge the matching rules; classes and ids are lower-case, as the sheet is."""
         keys = [("t", tag)]
         keys += [("c", c) for c in classes]
         keys += [("tc", f"{tag}.{c}") for c in classes]
         if ident:
             keys.append(("i", ident))
-        merged = Style()
-        sources: list[Mapping[str, tuple[str, bool]]] = []
-        pending: Declarations = []
-        for key in keys:
-            style = self._rules.get(key)
-            if style is not None:
-                merged = merged.merge(style)
-            if key in self._custom:
-                sources.append(self._custom[key])
-            pending.extend(self._deferred.get(key, ()))
-        inline_custom: dict[str, tuple[str, bool]] = {}
-        inline_deferred: Declarations = []
-        if inline:
-            plain, inline_custom, inline_deferred = _split(inline)
-            merged = merged.merge(_evaluate(plain))
-            sources.append(inline_custom)
-            pending.extend(inline_deferred)
-        if len(pending) > _MAX_PENDING:
-            return merged.merge(Style(direct=True))
-        if not pending:
-            return merged
-        if inline_custom or inline_deferred:
-            return merged.combine(_resolve(pending, sources))
-        cache_key = tuple(keys)
-        resolved = self._cache.get(cache_key)
-        if resolved is None:
-            resolved = _resolve(pending, sources)
-            if len(self._cache) < _MAX_CACHE:
-                self._cache[cache_key] = resolved
-        return merged.combine(resolved)
+        flags = Style()
+        applicable: list[tuple[int, int, bool, Props]] = []
+        for key in dict.fromkeys(keys):
+            if key in self._flags:
+                flags = flags.merge(self._flags[key])
+                for (important, _), (position, props) in self._entries[key].items():
+                    applicable.append((_SPECIFICITY[key[0]], position, important, props))
+        applicable.sort(key=lambda entry: entry[:2])
+        normal = important_props = Props()
+        for _, _, important, props in applicable:
+            if important:
+                important_props = important_props.merge(props)
+            else:
+                normal = normal.merge(props)
+        return Style(flags.direct, flags.clipped, flags.empty, normal, important_props)
 
 
 def _add_rule(sheet: Sheet, prelude: str, body: str) -> None:
@@ -1056,23 +929,24 @@ def _add_rule(sheet: Sheet, prelude: str, body: str) -> None:
     if not prelude or prelude.startswith("@") or "{" in body:
         return
     declarations, _ = parse_declarations(body)
-    plain, custom, deferred = _split(declarations)
-    style = _evaluate(plain)
-    if style == Style() and not custom and not deferred:
+    style = evaluate(declarations)
+    if style == Style():
         return
+    position = sheet.count
+    sheet.count += 1
     for raw in prelude.split(","):
         match = _SIMPLE_SELECTOR.fullmatch(normalize(raw))
         if match is None or not match.group():
             continue
         tag, kind, name = match.groups()
         if kind is None:
-            sheet.add(("t", str(tag)), style, custom, deferred)
+            sheet.add(("t", str(tag)), style, position)
         elif kind == "#":
-            sheet.add(("i", name), style, custom, deferred)
+            sheet.add(("i", name), style, position)
         elif tag:
-            sheet.add(("tc", f"{tag}.{name}"), style, custom, deferred)
+            sheet.add(("tc", f"{tag}.{name}"), style, position)
         else:
-            sheet.add(("c", name), style, custom, deferred)
+            sheet.add(("c", name), style, position)
 
 
 def parse_stylesheet(css: str) -> Sheet:

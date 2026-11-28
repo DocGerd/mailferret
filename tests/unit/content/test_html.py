@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from hypothesis import assume, given, settings
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from mailferret.content import html as html_module
@@ -279,6 +279,54 @@ HIDDEN_VECTORS = {
     + ")" * 60
     + '">{c}</span>',
     "clipped_box_calc": '<div style="max-height:calc(0px);overflow:hidden">{c}</div>',
+    "cascade_attr_order_hv": (
+        "<style>.v{{font-size:14px}}.h{{font-size:0}}</style><span class='h v'>{c}</span>"
+    ),
+    "cascade_attr_order_vh": (
+        "<style>.v{{font-size:14px}}.h{{font-size:0}}</style><span class='v h'>{c}</span>"
+    ),
+    "cascade_visibility_hv": (
+        "<style>.v{{visibility:visible}}.h{{visibility:hidden}}</style><span class='h v'>{c}</span>"
+    ),
+    "cascade_visibility_vh": (
+        "<style>.v{{visibility:visible}}.h{{visibility:hidden}}</style><span class='v h'>{c}</span>"
+    ),
+    "cascade_tag_class_hv": (
+        "<style>span.v{{font-size:14px}}span.h{{font-size:0}}</style><span class='h v'>{c}</span>"
+    ),
+    "cascade_tag_class_vh": (
+        "<style>span.v{{font-size:14px}}span.h{{font-size:0}}</style><span class='v h'>{c}</span>"
+    ),
+    "cascade_important_hv": (
+        "<style>.v{{font-size:14px !important}}.h{{font-size:0 !important}}</style>"
+        "<span class='h v'>{c}</span>"
+    ),
+    "cascade_important_vh": (
+        "<style>.v{{font-size:14px !important}}.h{{font-size:0 !important}}</style>"
+        "<span class='v h'>{c}</span>"
+    ),
+    "cascade_across_style_elements": (
+        "<style>.v{{font-size:14px}}</style><style>.h{{font-size:0}}</style>"
+        "<span class='h v'>{c}</span>"
+    ),
+    "cascade_class_beats_tag": (
+        "<style>.h{{font-size:0}}span{{font-size:14px}}</style><span class=h>{c}</span>"
+    ),
+    "cascade_id_beats_class": (
+        "<style>#i{{font-size:0}}.v{{font-size:14px}}</style><span id=i class=v>{c}</span>"
+    ),
+    "cascade_parent_class_child_two_classes": (
+        "<style>.v{{font-size:14px}}.h{{font-size:0}}</style>"
+        "<div class='h'><b class='h v'>{c}</b></div>"
+    ),
+    "cascade_important_sheet_beats_later_normal": (
+        "<style>.h{{font-size:0 !important}}.v{{font-size:14px}}</style>"
+        "<span class='v h'>{c}</span>"
+    ),
+    "cascade_later_rule_same_class": (
+        "<style>.h{{font-size:14px}}.v{{font-size:14px}}.h{{font-size:0}}</style>"
+        "<span class='v h'>{c}</span>"
+    ),
     "transparent_bg_no_coloured_ancestor": (
         '<span style="background:transparent;color:#fff">{c}</span>'
     ),
@@ -410,18 +458,11 @@ def test_hidden_vector_is_removed(name: str) -> None:
         '<span style="font-size:calc(12px)">{c}</span>',
         '<span style="font-size:clamp(14px,2vw,18px)">{c}</span>',
         '<span style="font-size:calc(min(0px, 1%) * -1)">{c}</span>',
-        '<span style="--s:13px;font-size:var(--s)">{c}</span>',
-        '<span style="font-size:var(--u, 13px)">{c}</span>',
-        '<span style="--o:1;opacity:var(--o)">{c}</span>',
-        '<span style="opacity:var(--u, 0.5)">{c}</span>',
-        '<span style="--d:block;display:var(--d)">{c}</span>',
-        '<span style="--l:0;position:absolute;left:var(--l)">{c}</span>',
-        '<span style="--v:visible;visibility:var(--v)">{c}</span>',
-        '<div style="font-size:0"><b style="--s:13px;font-size:var(--s)">{c}</b></div>',
-        "<style>.a{{--s:13px}}</style>"
-        '<div style="font-size:0"><b class=a style="font-size:var(--s)">{c}</b></div>',
-        "<style>.a{{font-size:var(--s)}}</style>"
-        '<div style="font-size:0"><b class=a style="--s:13px">{c}</b></div>',
+        '<span style="color:var(--x)">{c}</span>',
+        '<span style="padding:var(--x);margin:var(--m)">{c}</span>',
+        '<span style="background:var(--b, #000);color:#000">{c}</span>',
+        '<span style="--font-size:0;--opacity:0;font-size:12px">{c}</span>',
+        '<span style="padding-left:env(safe-area-inset-left)">{c}</span>',
         '<span style="font-size:calc(1em+2px)">{c}</span>',
         '<span style="font-size:-webkit-calc(12px)">{c}</span>',
         '<span style="font:calc(12px) a">{c}</span>',
@@ -442,6 +483,19 @@ def test_hidden_vector_is_removed(name: str) -> None:
         '<td style="font-size:0"><span style="font-size:12px;font-size:13px">{c}</span></td>',
         '<style>.a{{font-size:12px}}</style><div style="font-size:0"><b class=a>{c}</b></div>',
         '<td background="https://example.com/b.png" style="color:#fff">{c}</td>',
+        "<style>.h{{font-size:0}}.v{{font-size:14px}}</style><span class='h v'>{c}</span>",
+        "<style>.h{{font-size:0}}.v{{font-size:14px}}</style><span class='v h'>{c}</span>",
+        "<style>.h{{visibility:hidden}}.v{{visibility:visible}}</style>"
+        "<span class='v h'>{c}</span>",
+        "<style>span.h{{font-size:0}}span.v{{font-size:14px}}</style><span class='v h'>{c}</span>",
+        "<style>.h{{font-size:0}}.v{{font-size:14px}}</style>"
+        "<div class=h><b class='h v'>{c}</b></div>",
+        "<style>.h{{font-size:0}}#i{{font-size:14px}}</style><span id=i class=h>{c}</span>",
+        "<style>span{{font-size:0}}.v{{font-size:14px}}</style><span class=v>{c}</span>",
+        "<style>.h{{font-size:0 !important}}.v{{font-size:14px !important}}</style>"
+        "<span class='h v'>{c}</span>",
+        "<style>.v{{font-size:14px !important}}.h{{font-size:0}}</style>"
+        "<span class='h v'>{c}</span>",
         '<span style="background:linear-gradient(#fff,#000);color:#fff">{c}</span>',
         '<span style="background:linear-gradient(#fff,#fff),url(x.png);color:#fff">{c}</span>',
         '<span style="background:linear-gradient(#fff,blue);color:#fff">{c}</span>',
@@ -1020,57 +1074,131 @@ def test_fuzz_unknown_function_in_a_hiding_property_fails_closed(
     assert NOTE_HIDDEN in result.notes
 
 
-# How a size is written: (template, custom property declarations, whether it can resolve)
-_VARIABLE_READS = [
-    ("var(--z)", "--z:{v};", True),
-    ("var(--u, {v})", "", True),
-    ("var(--z, {v})", "--z:{v};", True),
-    ("var(--a)", "--a:var(--z);--z:{v};", True),
-    ("var(--u)", "", False),
-    ("var(--z)", "--y:{v};", False),
-    ("env(x)", "", False),
-    ("env(x, {v})", "", False),
-    ("var(--a)", "--a:var(--a);", False),
-    ("var(--z)", "--z:var(--z, {v});", False),
+_VARIABLE_FORMS = [
+    "var(--u)",
+    "var(--z)",
+    "var(--u, {fallback})",
+    "var(--z, {fallback})",
+    "var(--u, var(--z, {fallback}))",
+    "env(x)",
+    "env(safe-area-inset-left, {fallback})",
+    "VAR(--U)",
+]
+_VARIABLE_POSITIONS = [
+    "{f}",
+    "calc({f} + 1px)",
+    "calc(20px - {f})",
+    "min(20px, {f})",
+    "max(20px, {f})",
+    "clamp(1px, {f}, 20px)",
+    "calc(calc({f}))",
+]
+_HIDING_PROPERTIES = [
+    "font-size:{v}",
+    "font:{v} a",
+    "font:12px/{v} a",
+    "font:italic 12px a, {v}",
+    "visibility:{v}",
+    "opacity:{v}",
+    "display:{v}",
+    "mso-hide:{v}",
+    "clip-path:{v}",
+    "position:absolute;left:{v}",
+    "margin-left:{v}",
+    "text-indent:{v}",
+    "overflow:{v};height:0",
+    "overflow:hidden;height:{v}",
 ]
 
 
 @FUZZ
-@given(_size_values, st.sampled_from(_VARIABLE_READS), st.booleans(), st.booleans())
-def test_fuzz_variable_reads_follow_the_allowlist_or_fail_closed(
-    value: str, read: tuple[str, str, bool], tiny_parent: bool, sheet: bool
+@given(
+    st.sampled_from(_HIDING_PROPERTIES),
+    st.sampled_from(_VARIABLE_FORMS),
+    st.sampled_from(_VARIABLE_POSITIONS),
+    st.sampled_from(["0px", "13px", "0", "1", "none", "visible", "block", "1em", ""]),
+    st.sampled_from(["", "--z:13px;", "--u:0px;--z:13px;", "--z:var(--z);"]),
+    st.booleans(),
+    st.booleans(),
+)
+def test_fuzz_any_variable_read_in_a_hiding_property_hides(
+    declaration: str,
+    form: str,
+    position: str,
+    fallback: str,
+    custom: str,
+    sheet: bool,
+    tiny_parent: bool,
 ) -> None:
-    template, custom, resolves = read
-    depth = 0
-    for char in value:  # an unclosed parenthesis swallows the rest of the block, as in browsers
-        depth = depth + (char == "(") - (char == ")")
-        assume(depth >= 0)
-    assume(depth == 0)
-    declarations = custom.replace("{v}", value) + "font-size:" + template.replace("{v}", value)
+    value = position.replace("{f}", form.replace("{fallback}", fallback))
+    css = custom + declaration.replace("{v}", value)
     if sheet:
-        child = f"<style>b{{{declarations}}}</style><b>{CANARY}</b>"
+        child = f"<style>b{{{css}}}</style><b>{CANARY}</b>"
     else:
-        child = f'<b style="{declarations}">{CANARY}</b>'
+        child = f'<b style="{css}">{CANARY}</b>'
     html = f'<div style="font-size:0">{child}</div>' if tiny_parent else child
-    shown = html_to_text(html).text == CANARY
-    wide = value in ("initial", "inherit", "unset", "revert") and "{v}" in custom
-    if not resolves or wide:
-        assert not shown
-    elif tiny_parent:
-        assert shown == _oracle_size_clears(value)
+    result = html_to_text(f"<p>a</p>{html}")
+    assert result.text == "a"
+    assert NOTE_HIDDEN in result.notes
+
+
+# One fixed sheet, in source order: (selector, specificity, size, important)
+_CASCADE_RULES = [
+    ("span", 1, "14px", False),
+    (".a", 10, "14px", False),
+    (".b", 10, "0", False),
+    (".c", 10, "14px", False),
+    (".d", 10, "0", False),
+    ("span.a", 11, "0", False),
+    ("#i", 100, "14px", False),
+    (".e", 10, "14px", True),
+    (".f", 10, "0", True),
+    (".b", 10, "14px", False),
+    ("span", 1, "0", False),
+]
+_CASCADE_SHEET = (
+    "<style>"
+    + "".join(
+        f"{selector}{{font-size:{size}{' !important' if important else ''}}}"
+        for selector, _, size, important in _CASCADE_RULES
+    )
+    + "</style>"
+)
+
+
+def _cascade_shows(classes: list[str], ident: bool) -> bool:
+    """The browser result: the winner by importance, specificity, then source position."""
+
+    def matches(selector: str) -> bool:
+        if selector == "span":
+            return True
+        if selector == "#i":
+            return ident
+        name = selector.removeprefix("span").removeprefix(".")
+        return name in classes
+
+    winner = max(
+        (
+            (important, specificity, position, size)
+            for position, (selector, specificity, size, important) in enumerate(_CASCADE_RULES)
+            if matches(selector)
+        ),
+        default=(False, 0, 0, "14px"),
+    )
+    return winner[3] != "0"
 
 
 @FUZZ
 @given(
-    st.sampled_from(["opacity", "visibility", "font-size", "font", "left", "display", "height"]),
-    st.sampled_from(["var(--u)", "env(x)", "env(x, 1)", "var(--a)", "calc(var(--u) + 1px)"]),
+    st.lists(st.sampled_from(list("abcdef")), unique=True, max_size=6),
+    st.booleans(),
 )
-def test_fuzz_unresolvable_variables_hide_in_every_hiding_property(prop: str, value: str) -> None:
-    extra = "overflow:hidden;" if prop == "height" else ""
-    css = f"{extra}--a:var(--a);{prop}:{value}" + (" a" if prop == "font" else "")
-    result = html_to_text(f'<p>a</p><span style="{css}">{CANARY}</span>')
-    assert result.text == "a"
-    assert NOTE_HIDDEN in result.notes
+def test_fuzz_class_attribute_order_never_changes_the_cascade(
+    classes: list[str], ident: bool
+) -> None:
+    attributes = (f"class='{' '.join(classes)}'" if classes else "") + (" id=i" if ident else "")
+    result = html_to_text(f"{_CASCADE_SHEET}<span {attributes}>{CANARY}</span>")
+    assert (result.text == CANARY) == _cascade_shows(classes, ident)
 
 
 @FUZZ
@@ -1222,15 +1350,3 @@ def test_variation_selectors_are_stripped() -> None:
     assert strip_invisible(f"{heart}{vs16} ok") == (f"{heart}{vs16} ok", False)
     assert strip_invisible(f" {vs16}x")[0] == " x"
     assert strip_format(f"a{hidden}b") == (f"a{hidden}b", False)
-
-
-def test_variable_resolution_stays_fast_on_many_elements() -> None:
-    chain = "".join(f"--a{i}:var(--a{i + 1}) var(--a{i + 1});" for i in range(8))
-    sheet = f"<style>.a{{{chain}--a8:13px;font-size:var(--a0)}}</style>"
-    body = "".join(f"<b class=a style='--q:{i}px;font-size:var(--q)'>x</b>" for i in range(5000))
-    started = time.monotonic()
-    result = html_to_text(sheet + body + "<i class=a>y</i>")
-    assert time.monotonic() - started < 3.0
-    assert "y" not in result.text  # the chain is too deep to resolve: hidden
-    assert result.text.startswith("x")
-    assert NOTE_HIDDEN in result.notes

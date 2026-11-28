@@ -370,172 +370,75 @@ def _style(css: str) -> Style:
     return evaluate(parse_declarations(css)[0])
 
 
-@pytest.mark.parametrize(
-    ("css", "expected"),
-    [
-        ("font-size:var(--undefined, 0px)", Flag.ON),
-        ("--z:0px;font-size:var(--z)", Flag.ON),
-        ("font-size:var(--z);--z:0px", Flag.ON),
-        ("--z:13px;font-size:var(--z)", Flag.OFF),
-        ("font-size:var(--u, 13px)", Flag.OFF),
-        ("font-size:var(--x)", Flag.ON),
-        ("font-size:var(x)", Flag.ON),
-        ("font-size:var(x, 13px)", Flag.ON),
-        ("--z:1px;font-size:calc(" + " + ".join(["var(--z)"] * 20) + ")", Flag.ON),
-        ("--z:1px;font-size:calc(" + " + ".join(["var(--z)"] * 10) + ")", Flag.INHERIT),
-        (
-            "".join(f"--a{i}:var(--a{i + 1});" for i in range(8)) + "--a8:13px;font-size:var(--a0)",
-            Flag.ON,
-        ),
-        (
-            "".join(f"--a{i}:var(--a{i + 1});" for i in range(4)) + "--a4:13px;font-size:var(--a0)",
-            Flag.OFF,
-        ),
-        ("font-size:" + "var(--x, " * 8 + "13px" + ")" * 8, Flag.ON),
-        ("font-size:env(x)", Flag.ON),
-        ("font-size:env(x, 13px)", Flag.ON),
-        ("--a:13px;font-size:env(--a)", Flag.ON),
-        ("--a:13px;font-size:env(--a, 13px)", Flag.ON),
-        ("--z:initial;font-size:var(--z)", Flag.ON),
-        ("--z:initial;font-size:var(--z, 13px)", Flag.ON),
-        ("--z:inherit;font-size:var(--z, 13px)", Flag.ON),
-        ("--a:var(--b);--b:var(--a);font-size:var(--a)", Flag.ON),
-        ("--a:var(--a);font-size:var(--a, 13px)", Flag.ON),
-        ("--a:var(--b);--b:0px;font-size:var(--a)", Flag.ON),
-        ("--a:var(--b);--b:13px;font-size:var(--a)", Flag.OFF),
-        ("font-size:var(--x, var(--y, 0px))", Flag.ON),
-        ("font-size:var(--x, var(--y, 13px))", Flag.OFF),
-        ("--z:0px !important;--z:13px;font-size:var(--z)", Flag.ON),
-        ("--z:13px;--z:0px;font-size:var(--z)", Flag.ON),
-        ("--z:0.5px;font-size:calc(var(--z) * 2)", Flag.ON),
-        ("--z:20px;font-size:calc(var(--z) * 2)", Flag.INHERIT),
-        ("--z:1em;font-size:var(--z)", Flag.INHERIT),
-        ("--z:0px;font:var(--z) a", Flag.ON),
-        ("--z:13px;font:var(--z) a", Flag.INHERIT),
-        # An unresolvable chain, a too deep one and a too big one fail closed.
-        (
-            "--a0:var(--a1);"
-            + "".join(f"--a{i}:var(--a{i + 1});" for i in range(1, 20))
-            + "--a20:13px;font-size:var(--a0)",
-            Flag.ON,
-        ),
-        ("--z:" + "1" * 2000 + "px;font-size:var(--z)", Flag.ON),
-        ("font-size:" + "var(--x, " * 50 + "13px" + ")" * 50, Flag.ON),
-        ("font-size:" + "var(--x) " * 100, Flag.ON),
-        # Order is unknown to the resolver, so a hiding value wins either way.
-        ("font-size:var(--z);font-size:0;--z:13px", Flag.ON),
-        ("font-size:0;font-size:var(--z);--z:13px", Flag.ON),
-    ],
-)
-def test_variables_resolve_or_fail_closed_in_font_size(css: str, expected: Flag) -> None:
-    assert _tiny(css) is expected
+# Any variable read in a hiding property hides, wherever it sits and whatever it falls back to.
+VARIABLE_READS = [
+    "var(--x)",
+    "var(--x, 13px)",
+    "var(--x, var(--y, 13px))",
+    "VAR(--X)",
+    "v\\61r(--x)",
+    "env(x)",
+    "env(x, 13px)",
+    "env(safe-area-inset-left)",
+    "calc(var(--x) + 1px)",
+    "calc(20px + env(x))",
+    "min(20px, var(--x))",
+    "max(20px, var(--x, 20px))",
+    "clamp(14px, var(--x), 18px)",
+]
+HIDING_DECLARATIONS = [
+    "font-size:{v}",
+    "font:{v} a",
+    "font:12px/{v} a",
+    "font:italic bold 12px a, {v}",
+    "visibility:{v}",
+    "opacity:{v}",
+    "display:{v}",
+    "mso-hide:{v}",
+    "clip-path:{v}",
+    "left:{v}",
+    "margin-left:{v}",
+    "text-indent:{v}",
+    "overflow:{v};height:0",
+    "overflow:hidden;height:{v}",
+    "overflow:hidden;max-width:{v}",
+]
+
+
+@pytest.mark.parametrize("read", VARIABLE_READS)
+@pytest.mark.parametrize("declaration", HIDING_DECLARATIONS)
+def test_any_variable_read_in_a_hiding_property_hides(declaration: str, read: str) -> None:
+    style = _style("--x:13px;" + declaration.replace("{v}", read))
+    hidden_by = [
+        style.hidden,
+        style.tiny is Flag.ON,
+        style.invisible is Flag.ON,
+    ]
+    assert any(hidden_by), declaration
 
 
 @pytest.mark.parametrize(
     "css",
     [
-        "opacity:env(x)",
-        "opacity:var(--o)",
-        "--o:0;opacity:var(--o)",
-        "opacity:var(--u, 0)",
-        "--o:calc(0/0);opacity:var(--o)",
-        "--l:-9999px;left:var(--l)",
-        "left:var(--l)",
-        "display:var(--d, none)",
-        "--d:none;display:var(--d)",
-        "display:env(x)",
-        "--m:all;mso-hide:var(--m)",
-        "--c:inset(100%);clip-path:var(--c)",
-        "overflow:hidden;--h:0;height:var(--h)",
-        "overflow:hidden;height:var(--h)",
-        "--o:hidden;overflow:var(--o);height:0",
-        "overflow:var(--o);height:0",
-        "overflow:hidden;--h:0px;max-height:calc(var(--h) + 0px)",
-        "text-indent:var(--i)",
+        "color:var(--x)",
+        "background:var(--x)",
+        "background-color:var(--x, #fff)",
+        "padding:var(--x)",
+        "margin:var(--x)",
+        "border-color:var(--x)",
+        "line-height:var(--x)",
+        "font-family:var(--x)",
+        "font-weight:var(--x)",
+        "padding-left:env(safe-area-inset-left)",
+        "--x:0px;color:red",
+        "--font-size:0;color:red",
     ],
 )
-def test_variables_in_hiding_properties_hide_when_small_or_unresolved(css: str) -> None:
-    assert _style(css).hidden, css
-
-
-@pytest.mark.parametrize(
-    "css",
-    [
-        "--o:1;opacity:var(--o)",
-        "opacity:var(--u, 0.5)",
-        "--d:block;display:var(--d)",
-        "--l:0;position:absolute;left:var(--l)",
-        "--h:20px;overflow:hidden;height:var(--h)",
-        "--o:visible;overflow:var(--o);height:0",
-        "--z:13px;font-size:var(--z)",
-    ],
-)
-def test_resolved_variables_do_not_hide(css: str) -> None:
-    assert not _style(css).hidden, css
-
-
-def test_visibility_variables() -> None:
-    assert _style("--v:hidden;visibility:var(--v)").invisible is Flag.ON
-    assert _style("--v:visible;visibility:var(--v)").invisible is Flag.OFF
-    assert _style("visibility:var(--v)").invisible is Flag.ON
-    assert _style("visibility:env(x)").invisible is Flag.ON
-    assert _style("visibility:var(--v, hidden)").invisible is Flag.ON
-
-
-def test_custom_properties_cascade_across_a_sheet_and_inline_style() -> None:
-    sheet = parse_stylesheet(
-        ".a{font-size:var(--z)} .b{--z:0px} .c{--z:13px !important}"
-        " .d{font-size:var(--z) !important}"
-    )
-
-    def tiny(classes: list[str], inline: str = "") -> Flag | None:
-        declarations = parse_declarations(inline)[0] if inline else None
-        return sheet.style_for("b", classes, None, declarations).tiny
-
-    assert tiny(["a"]) is Flag.ON  # no --z anywhere
-    assert tiny(["a", "b"]) is Flag.ON
-    assert tiny(["a"], "--z:0px") is Flag.ON
-    assert tiny(["a"], "--z:13px") is Flag.OFF
-    assert tiny(["a", "b"], "--z:13px") is Flag.OFF  # inline beats the sheet
-    assert tiny(["a", "c"], "--z:0px") is Flag.OFF  # an important sheet value beats inline
-    assert tiny(["x"], "font-size:var(--z)") is Flag.ON
-    assert tiny(["b"], "font-size:var(--z)") is Flag.ON
-    assert tiny(["c"], "font-size:var(--z)") is Flag.OFF
-    assert tiny(["d", "c"]) is Flag.OFF
-
-
-def test_too_many_variable_declarations_in_one_rule_hide_the_element() -> None:
-    body = "".join("font-size:var(--z);" for _ in range(20))
-    sheet = parse_stylesheet(f".a{{--z:13px;{body}}}")
-    assert sheet.style_for("b", ["a"], None).hidden
-    assert (
-        not parse_stylesheet(".a{--z:13px;font-size:var(--z)}").style_for("b", ["a"], None).hidden
-    )
-
-
-def test_variable_resolution_is_bounded_and_linear() -> None:
-    chain = "".join(f"--a{i}:var(--a{i + 1}) var(--a{i + 1});" for i in range(40))
-    fan_out = "font-size:" + "var(--a0) " * 200
-    started = time.monotonic()
-    for _ in range(200):
-        assert _tiny(chain + fan_out) is Flag.ON
-    big = "--z:" + "var(--z) " * 100_000
-    assert _tiny(big + ";font-size:var(--z)") is Flag.ON
-    sheet = parse_stylesheet(
-        ".a{--s:13px} " + "".join(f".c{i}{{font-size:var(--s)}}" for i in range(20_000))
-    )
-    for i in range(20_000):
-        sheet.style_for(
-            "b", ["a", f"c{i}"], None, parse_declarations("--q:1px;font-size:var(--q)")[0]
-        )
-    assert time.monotonic() - started < 5.0
-
-
-def test_too_many_pending_declarations_on_one_element_hide_it() -> None:
-    rules = "".join(f".c{i}{{--z:13px;{'font-size:var(--z);' * 8}}}" for i in range(9))
-    sheet = parse_stylesheet(rules)
-    assert not sheet.style_for("b", ["c0"], None).hidden
-    assert sheet.style_for("b", [f"c{i}" for i in range(9)], None).hidden
+def test_variables_in_other_properties_stay_harmless(css: str) -> None:
+    style = _style(css)
+    assert not style.hidden
+    assert style.tiny is None
+    assert style.invisible is None
 
 
 def test_clipping_and_a_zero_box_from_different_rules_hide() -> None:
@@ -543,3 +446,37 @@ def test_clipping_and_a_zero_box_from_different_rules_hide() -> None:
     assert sheet.style_for("b", ["a", "b"], None).hidden
     assert not sheet.style_for("b", ["a"], None).hidden
     assert not sheet.style_for("b", ["b"], None).hidden
+
+
+def test_rules_apply_in_source_order_not_class_attribute_order() -> None:
+    sheet = parse_stylesheet(".v{font-size:14px}.h{font-size:0}")
+    assert sheet.style_for("b", ["h", "v"], None).tiny is Flag.ON
+    assert sheet.style_for("b", ["v", "h"], None).tiny is Flag.ON
+    sheet = parse_stylesheet(".h{font-size:0}.v{font-size:14px}")
+    assert sheet.style_for("b", ["h", "v"], None).tiny is Flag.OFF
+    assert sheet.style_for("b", ["v", "h"], None).tiny is Flag.OFF
+
+
+def test_specificity_importance_and_style_elements() -> None:
+    sheet = parse_stylesheet(".h{font-size:0}b{font-size:14px}")
+    assert sheet.style_for("b", ["h"], None).tiny is Flag.ON
+    sheet = parse_stylesheet("#i{font-size:14px}.h{font-size:0}b.h{font-size:0}")
+    assert sheet.style_for("b", ["h"], "i").tiny is Flag.OFF
+    sheet = parse_stylesheet(".h{font-size:0 !important}.v{font-size:14px}")
+    assert sheet.style_for("b", ["v", "h"], None).tiny is Flag.ON
+    first = parse_stylesheet(".v{font-size:14px}")
+    later = parse_stylesheet(".h{font-size:0}")
+    first.update(later)
+    assert first.style_for("b", ["h", "v"], None).tiny is Flag.ON
+    assert first.style_for("b", ["v"], None).tiny is Flag.OFF
+    reverse = parse_stylesheet(".h{font-size:0}")
+    reverse.update(parse_stylesheet(".v{font-size:14px}"))
+    assert reverse.style_for("b", ["h", "v"], None).tiny is Flag.OFF
+
+
+def test_a_key_with_many_rules_stays_cheap_and_keeps_the_last_effect() -> None:
+    started = time.monotonic()
+    sheet = parse_stylesheet(".g{font-size:14px}" + ".f{color:red}" * 50_000 + ".f{font-size:0}")
+    for _ in range(20_000):
+        assert sheet.style_for("b", ["g", "f"], None).tiny is Flag.ON
+    assert time.monotonic() - started < 3.0
