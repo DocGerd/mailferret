@@ -16,6 +16,10 @@ MIB: Final = 1024 * KIB
 # its margin are in tests/unit/imap/test_overhead.py.
 LINE_OVERHEAD_BYTES: Final = 424
 
+# Line bytes (with their overhead) one fetched message is allowed in a FETCH response (L-32).
+# Proposed; to be re-measured on real mail in D5. Not a [limits] key.
+FETCH_LINE_ALLOWANCE_BYTES: Final = 32 * KIB
+
 CEILINGS: Final[Mapping[str, int]] = MappingProxyType(
     {
         "max_message_bytes": 25 * MIB,
@@ -48,6 +52,7 @@ CEILINGS: Final[Mapping[str, int]] = MappingProxyType(
         "max_criteria": 16,
         "fetch_batch_size": 200,
         "max_command_response_bytes": 27 * MIB,
+        "max_response_line_bytes": 5 * MIB // 2,
         "keyring_probe_seconds": 10,
         "credential_stderr_bytes": 16 * KIB,
         "credential_status_bytes": 16 * KIB,
@@ -103,6 +108,7 @@ class Limits(BaseModel):
     max_criteria: int = CEILINGS["max_criteria"]
     fetch_batch_size: int = CEILINGS["fetch_batch_size"]
     max_command_response_bytes: int = CEILINGS["max_command_response_bytes"]
+    max_response_line_bytes: int = CEILINGS["max_response_line_bytes"]
     keyring_probe_seconds: int = CEILINGS["keyring_probe_seconds"]
     credential_stderr_bytes: int = CEILINGS["credential_stderr_bytes"]
     credential_status_bytes: int = CEILINGS["credential_status_bytes"]

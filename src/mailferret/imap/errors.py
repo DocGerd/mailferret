@@ -99,7 +99,9 @@ class ReadOnlyViolation(SessionError):
         self.reason: ViolationReason = reason
 
 
-BreachKind = Literal["literal_over_cap", "response_over_total", "line_over_limit"]
+BreachKind = Literal[
+    "literal_over_cap", "response_over_total", "response_over_line_total", "line_over_limit"
+]
 
 
 class LimitBreach(SessionError):
