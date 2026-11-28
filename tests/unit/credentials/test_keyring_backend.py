@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import socket
 import sys
@@ -280,7 +281,7 @@ def test_planted_keyring_module_in_the_data_dir_is_never_imported(tmp_path: Path
 
 @pytest.fixture
 def mute_bus(tmp_path: Path) -> Iterator[str]:
-    """A session bus that accepts connections and never answers (V3 E6)."""
+    """A session bus that completes the SASL handshake and then never answers (V3 E6)."""
     if not hasattr(socket, "AF_UNIX"):
         pytest.skip("no AF_UNIX")
     path = tmp_path / "mute.sock"
@@ -290,13 +291,35 @@ def mute_bus(tmp_path: Path) -> Iterator[str]:
     held: list[socket.socket] = []
     stop = threading.Event()
 
+    def serve(conn: socket.socket) -> None:
+        buf = b""
+        while not stop.is_set():
+            try:
+                data = conn.recv(4096)
+            except OSError:
+                return
+            if not data:
+                return
+            buf += data
+            while b"\r\n" in buf:
+                line, buf = buf.split(b"\r\n", 1)
+                line = line.lstrip(b"\0")
+                if line.startswith(b"AUTH"):
+                    conn.sendall(b"OK 0123456789abcdef0123456789abcdef\r\n")
+                elif line.startswith(b"NEGOTIATE_UNIX_FD"):
+                    conn.sendall(b"AGREE_UNIX_FD\r\n")
+                elif line.startswith(b"BEGIN"):
+                    buf = b""
+
     def accept() -> None:
         server.settimeout(0.2)
         while not stop.is_set():
             try:
-                held.append(server.accept()[0])
+                conn = server.accept()[0]
             except OSError:
                 continue
+            held.append(conn)
+            threading.Thread(target=serve, args=(conn,), daemon=True).start()
 
     thread = threading.Thread(target=accept, daemon=True)
     thread.start()
@@ -331,16 +354,96 @@ def test_mute_bus_blocking_probe_is_bounded(tmp_path: Path, mute_bus: str) -> No
 
 
 @linux_only
-def test_mute_bus_repro_with_the_real_keyring(tmp_path: Path, mute_bus: str) -> None:
-    """Retained V3 E6 repro: the real Secret Service backend against a bus that never replies."""
+@pytest.mark.parametrize("forced", [True, False])
+def test_mute_bus_repro_with_the_real_keyring(tmp_path: Path, mute_bus: str, forced: bool) -> None:
+    """Retained V3 E6 repro: the real keyring against a bus that authenticates and goes silent."""
     pytest.importorskip("keyring")
     pytest.importorskip("secretstorage")
-    environ = env_for(
-        tmp_path, mute_bus, PYTHON_KEYRING_BACKEND="keyring.backends.SecretService.Keyring"
+    extra = {"PYTHON_KEYRING_BACKEND": "keyring.backends.SecretService.Keyring"} if forced else {}
+    bound = 3
+    kb = KeyringBackend(
+        tmp_path / "d",
+        Limits(keyring_probe_seconds=bound),
+        environ=env_for(tmp_path, mute_bus, **extra),
     )
-    kb = KeyringBackend(tmp_path / "d", Limits(keyring_probe_seconds=3), environ=environ)
     start = time.monotonic()
-    with pytest.raises((CredentialTimeout, CredentialBackendUnavailable)):
+    with pytest.raises(CredentialTimeout):
         kb.get(KEY)
-    assert time.monotonic() - start < 3 + 2
-    assert kb.describe().status in {"timeout", "unavailable"}
+    elapsed = time.monotonic() - start
+    assert bound <= elapsed < bound + 2
+
+
+@pytest.fixture
+def clean_redaction() -> Iterator[None]:
+    from mailferret.logging import clear_secrets
+
+    clear_secrets()
+    yield
+    clear_secrets()
+
+
+def _forms(secret: str, login: str) -> list[str]:
+    import base64
+
+    quoted = secret.replace("\\", "\\\\").replace('"', '\\"')
+    blob = base64.b64encode(f"\0{login}\0{secret}".encode()).decode("ascii")
+    return [secret, quoted, blob]
+
+
+@pytest.mark.usefixtures("clean_redaction")
+@pytest.mark.parametrize("via", ["get", "set"])
+def test_secret_forms_are_registered_for_redaction(tmp_path: Path, bus: str, via: str) -> None:
+    from mailferret.logging import redact
+
+    kb = backend(tmp_path, bus)
+    if via == "get":
+        kb.set(KEY, Secret(SECRET))
+        from mailferret.logging import clear_secrets
+
+        clear_secrets()
+        assert redact(SECRET) == SECRET
+        kb.get(KEY)
+    else:
+        kb.set(KEY, Secret(SECRET))
+    for form in _forms(SECRET, KEY.login):
+        assert redact(f"line {form} end") == "line *** end"
+
+
+def test_unusable_data_dir_is_a_fixed_text_error(tmp_path: Path, bus: str) -> None:
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    kb = KeyringBackend(blocker / "data", environ=env_for(tmp_path, bus))
+    with pytest.raises(CredentialBackendError) as info:
+        kb.get(KEY)
+    assert str(tmp_path) not in str(info.value) + repr(info.value.args)
+    assert info.value.__cause__ is None
+    assert info.value.__suppress_context__
+
+
+def test_rejected_maps_to_the_documented_error_code() -> None:
+    assert CredentialRejected.code == "error"
+
+
+@pytest.mark.skipif(sys.platform not in {"darwin", "win32"}, reason="Keychain / Credential Locker")
+def test_real_probe_through_the_platform_keyring(tmp_path: Path) -> None:
+    """A§10 item 23: real set/get/delete under a throwaway service name, within L-27."""
+    import uuid
+
+    limits = Limits()
+    kb = KeyringBackend(tmp_path / "data", limits)
+    desc = kb.describe()
+    if desc.status != "ok" or not desc.secure:
+        pytest.skip(f"no usable platform keyring on this runner ({desc.status})")
+    expected = {"darwin": "macOS", "win32": "Windows"}[sys.platform]
+    assert expected in (desc.backend or "")
+    key = EntryKey(f"mailferret-test-{uuid.uuid4().hex}", "user", "imap.example.com")
+    start = time.monotonic()
+    try:
+        kb.set(key, Secret(SECRET))
+        assert kb.get(key).reveal() == SECRET
+    finally:
+        with contextlib.suppress(CredentialError):
+            kb.delete(key)
+    assert time.monotonic() - start < 3 * limits.keyring_probe_seconds
+    with pytest.raises(CredentialNotFound):
+        kb.get(key)

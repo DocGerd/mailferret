@@ -104,7 +104,10 @@ def run_probe(
         if not check.usable:
             return ProbeOutcome("unavailable", bus_status)
         bus_address = check.address
-    data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError:
+        raise CredentialBackendError from None
     command = [*argv, op] if key is None else [*argv, op, key.service, key.username]
     result = run_bounded(
         command,
