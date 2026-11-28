@@ -3,14 +3,27 @@
 from __future__ import annotations
 
 import base64
+import encodings
+import encodings.aliases
+import pkgutil
 
 from hypothesis import strategies as st
 
+from mailferret.content.charset import resolve_charset
 from tests.fixtures import corpus
 
 KNOWN_CHARSETS = ["utf-8", "iso-8859-1", "iso-8859-15", "windows-1252", "shift_jis", "ascii"]
 
+
+def accepted_codecs() -> list[str]:
+    """Every codec name the charset resolver accepts, found from the stdlib codec registry."""
+    names = {m.name for m in pkgutil.iter_modules(encodings.__path__)}
+    names |= set(encodings.aliases.aliases) | set(encodings.aliases.aliases.values())
+    return sorted({name for name in map(resolve_charset, names) if name})
+
+
 charset_labels = st.one_of(
+    st.sampled_from(accepted_codecs()),
     st.sampled_from(KNOWN_CHARSETS),
     st.sampled_from(["", "x-unknown", "UTF8", "utf-8 ", '"utf-8"', "latin1", "unicode-1-1-utf-7"]),
     st.text(max_size=20),

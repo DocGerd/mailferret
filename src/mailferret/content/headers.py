@@ -29,23 +29,28 @@ _NAME_SPECIALS: Final = frozenset('()<>[]:;@\\,."')
 _WHITESPACE: Final = " \t\r\n"
 
 
-def _strip_format(text: str) -> str:
+def _strip_format(text: str) -> tuple[str, bool]:
     """Remove Cf characters (bidi controls, zero-width, BOM) that disguise displayed text."""
     if text.isascii():
-        return text
-    return "".join(c for c in text if unicodedata.category(c) != "Cf")
+        return text, False
+    kept = "".join(c for c in text if unicodedata.category(c) != "Cf")
+    return kept, len(kept) != len(text)
 
 
-def _clean(text: str) -> str:
+def _clean(text: str) -> tuple[str, bool]:
     return _strip_format(text.translate(_CONTROLS))
 
 
 def _header_text(raw: bytes | str, limits: Limits) -> tuple[str, bool]:
-    if isinstance(raw, bytes):
-        data, cut = truncate_utf8_bytes(raw, limits.max_header_bytes)
-        return decode_text(data, None, partial=cut, limits=limits).text, cut
-    cut = len(raw) > limits.max_header_bytes
-    return raw[: limits.max_header_bytes], cut
+    """Bound a header input to L-05 bytes and decode it; lone surrogates become ``?``."""
+    size = limits.max_header_bytes
+    cut = False
+    if isinstance(raw, str):
+        cut = len(raw) > size
+        raw = raw[:size].encode("utf-8", errors="replace")
+    data, bytes_cut = truncate_utf8_bytes(raw, size)
+    decoded = decode_text(data, None, partial=bytes_cut, limits=limits)
+    return decoded.text, cut or bytes_cut or decoded.truncated
 
 
 def _word_payload(encoding: str, payload: str) -> bytes | None:
@@ -93,10 +98,10 @@ def _decode_words(text: str, limits: Limits) -> str:
     pos = 0
     for match in _ENCODED_WORD.finditer(text):
         gap = text[pos : match.start()]
-        if not (group and not gap.strip(_WHITESPACE)):
+        payload = _word_payload(match.group(2), match.group(3))
+        if not (payload is not None and group and not gap.strip(_WHITESPACE)):
             _flush(group, out, limits)
             out.append(gap)
-        payload = _word_payload(match.group(2), match.group(3))
         if payload is None:
             _flush(group, out, limits)
             out.append(match.group(0))
@@ -117,14 +122,16 @@ def decode_header_value(raw: bytes | str, limits: Limits = _DEFAULT_LIMITS) -> T
     text, cut = _header_text(raw, limits)
     unfolded = _FOLD.sub("", text)
     decoded = _decode_words(unfolded, limits) if "=?" in unfolded else unfolded
-    result = truncate_chars(_clean(decoded), limits.max_header_value_chars)
-    return Truncated(result.text, result.truncated or cut)
+    cleaned, stripped = _clean(decoded)
+    result = truncate_chars(cleaned, limits.max_header_value_chars)
+    return Truncated(result.text, result.truncated or cut, stripped)
 
 
 @dataclass(frozen=True, slots=True)
 class Parameters:
     values: dict[str, str]
     truncated: bool
+    stripped: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +142,10 @@ class HeaderParameters:
     @property
     def truncated(self) -> bool:
         return self.parameters.truncated
+
+    @property
+    def stripped(self) -> bool:
+        return self.parameters.stripped
 
 
 def _split_header(text: str) -> tuple[str, list[tuple[str, str]]]:
@@ -186,7 +197,8 @@ def _assemble(segments: dict[int, tuple[bool, str]], limits: Limits) -> tuple[st
         if len(data) > limits.max_header_bytes:
             break
     kept, cut = truncate_utf8_bytes(bytes(data), limits.max_header_bytes)
-    return decode_text(kept, charset, partial=cut, limits=limits).text, cut
+    decoded = decode_text(kept, charset, partial=cut, limits=limits)
+    return decoded.text, cut or decoded.truncated
 
 
 def decode_parameters(
@@ -195,13 +207,20 @@ def decode_parameters(
     """Join RFC 2231 continuations and decode extended values.
 
     ``pairs`` are raw ``(name, value)`` parameters, as a BODYSTRUCTURE or a header yields
-    them. Names are lower-cased; the first occurrence wins; indexes only order segments.
+    them. Names are lower-cased; the first occurrence wins; indexes only order segments. Pairs past
+    ``max_header_bytes`` (L-05) in total are dropped.
     """
     groups: dict[str, dict[int, tuple[bool, str]]] = {}
     truncated = False
+    stripped = False
+    budget = limits.max_header_bytes
     for raw_name, raw_value in pairs:
+        if budget <= 0:
+            truncated = True
+            break
         name, name_cut = _header_text(raw_name, limits)
         value, value_cut = _header_text(raw_value, limits)
+        budget -= len(name) + len(value)
         truncated = truncated or name_cut or value_cut
         match = _PARAM_NAME.fullmatch(name.lower())
         if match is None:
@@ -222,11 +241,14 @@ def decode_parameters(
             text, cut = _assemble({i: (False, v) for i, (_, v) in segments.items()}, limits)
             if "=?" in text:
                 decoded = decode_header_value(text, limits)
-                text, cut = decoded.text, decoded.truncated
-        result = truncate_chars(_clean(text), limits.max_header_value_chars)
+                text, cut = decoded.text, cut or decoded.truncated
+                stripped = stripped or decoded.stripped
+        cleaned, removed = _clean(text)
+        result = truncate_chars(cleaned, limits.max_header_value_chars)
         values[base] = result.text
         truncated = truncated or cut or result.truncated
-    return Parameters(values, truncated)
+        stripped = stripped or removed
+    return Parameters(values, truncated, stripped)
 
 
 def parse_header_parameters(raw: bytes | str, limits: Limits = _DEFAULT_LIMITS) -> HeaderParameters:
@@ -234,10 +256,15 @@ def parse_header_parameters(raw: bytes | str, limits: Limits = _DEFAULT_LIMITS) 
     text, cut = _header_text(raw, limits)
     main, pairs = _split_header(_FOLD.sub("", text))
     parameters = decode_parameters(pairs, limits)
-    head = truncate_chars(_clean(main).lower(), limits.max_header_value_chars)
+    cleaned, removed = _clean(main)
+    head = truncate_chars(cleaned.lower(), limits.max_header_value_chars)
     return HeaderParameters(
         head.text,
-        Parameters(parameters.values, parameters.truncated or cut or head.truncated),
+        Parameters(
+            parameters.values,
+            parameters.truncated or cut or head.truncated,
+            parameters.stripped or removed,
+        ),
     )
 
 
@@ -263,14 +290,15 @@ class FormattedAddress:
     address: str
     display: str
     truncated: bool
+    stripped: bool = False
 
 
 def _address_part(raw: bytes | str, limits: Limits) -> Truncated:
     text, cut = _header_text(raw, limits)
-    result = truncate_chars(
-        _ADDRESS_UNSAFE.sub("?", _strip_format(text)), limits.max_header_value_chars
-    )
-    return Truncated(result.text, result.truncated or cut)
+    text, removed = _strip_format(text)
+    text, rewritten = _ADDRESS_UNSAFE.subn("?", text)
+    result = truncate_chars(text, limits.max_header_value_chars)
+    return Truncated(result.text, result.truncated or cut, removed or rewritten > 0)
 
 
 def _display(name: str, address: str) -> str:
@@ -299,6 +327,7 @@ def format_address(
         email,
         _display(shown.text, email),
         local.truncated or domain.truncated or shown.truncated,
+        local.stripped or domain.stripped or shown.stripped,
     )
 
 

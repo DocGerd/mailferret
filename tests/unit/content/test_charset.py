@@ -10,11 +10,12 @@ from hypothesis import strategies as st
 from mailferret.content.charset import decode_text, resolve_charset
 from mailferret.limits import Limits
 from tests.fixtures import corpus
-from tests.strategies import arbitrary_bytes, charset_labels, mime_bytes
+from tests.strategies import accepted_codecs, arbitrary_bytes, charset_labels, mime_bytes
 
 UMLAUTS = "Grüße aus München"
 CJK = "日本語のテキスト"
 FFFD = "�"
+INTERNAL_ERROR_BYTES = b"\x1b.J\x1bN\x88"
 CASES = {f.name: f for f in corpus.charset_cases()}
 
 EXPECTED = {
@@ -204,3 +205,45 @@ def test_arbitrary_bytes_and_labels_give_valid_bounded_text(
     result.text.encode("utf-8")
     assert len(result.text) <= limits.max_part_bytes
     assert result.truncated == (len(data) > limits.max_part_bytes)
+
+
+ACCEPTED = accepted_codecs()
+CODEC_SAMPLES = [
+    b"",
+    b"\x1b.J\x1bN\x88",
+    b"\xff" * 7,
+    b"\x1b$B0!\x1b(B",
+    b"\x1b$)C\x0e!!",
+    "日本語é😀".encode(),
+    b"\x00\xd8\x00\xdc\x00\xd8",
+    bytes(range(256)),
+]
+
+
+def test_sweep_covers_the_codec_with_the_known_internal_error() -> None:
+    assert "iso2022_jp_2" in {c.replace("-", "_") for c in ACCEPTED}
+    assert len(ACCEPTED) > 50
+
+
+@pytest.mark.parametrize("codec", ACCEPTED)
+def test_every_accepted_codec_decodes_to_valid_bounded_text(codec: str) -> None:
+    limits = Limits(max_part_bytes=256)
+    for data in CODEC_SAMPLES:
+        for partial in (False, True):
+            result = decode_text(data, codec, partial=partial, limits=limits)
+            result.text.encode("utf-8")
+            assert len(result.text) <= limits.max_part_bytes
+
+
+def test_codec_internal_error_falls_back_instead_of_raising() -> None:
+    result = decode_text(INTERNAL_ERROR_BYTES, "iso-2022-jp-2")
+    assert result.fallback
+    result.text.encode("utf-8")
+
+
+@FUZZ
+@given(st.binary(max_size=64), st.sampled_from(ACCEPTED), st.booleans())
+def test_arbitrary_bytes_with_every_accepted_codec(data: bytes, codec: str, partial: bool) -> None:
+    result = decode_text(data, codec, partial=partial)
+    result.text.encode("utf-8")
+    assert len(result.text) <= len(data)

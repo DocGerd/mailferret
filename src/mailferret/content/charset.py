@@ -52,7 +52,7 @@ def resolve_charset(label: str | bytes | None) -> str | None:
             return None
         b"".decode(name)
         "".encode(name)
-    except (LookupError, ValueError, UnicodeError, TypeError):
+    except Exception:  # CPython codecs can raise outside the documented errors
         return None
     return name
 
@@ -60,7 +60,7 @@ def resolve_charset(label: str | bytes | None) -> str | None:
 def _attempt(data: bytes, codec: str, errors: str, *, final: bool) -> str | None:
     try:
         return codecs.getincrementaldecoder(codec)(errors=errors).decode(data, final=final)
-    except (LookupError, ValueError, UnicodeError, TypeError):
+    except Exception:  # CPython codecs can raise outside the documented errors
         return None
 
 
