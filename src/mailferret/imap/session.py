@@ -48,6 +48,8 @@ class ReadOnlySession:
         self._mark = threading.Lock()
         self._expired = False
         self.capabilities = capabilities
+        # After a failed login call: whether its command line was vetted and so may have left.
+        self.login_sent = False
 
     @property
     def usable(self) -> bool:
@@ -86,7 +88,7 @@ class ReadOnlySession:
         """LOGIN with ``str`` only, and only if imaplib can encode it (T-02).
 
         imaplib's ASCII encoding raises ``UnicodeEncodeError`` carrying the secret, so anything
-        else is refused here, before any byte is built; D3 routes it to AUTHENTICATE PLAIN.
+        else is refused here, before any byte is built; ``auth/`` routes it to AUTHENTICATE PLAIN.
         """
         if (
             type(username) is not str
@@ -150,6 +152,8 @@ class ReadOnlySession:
 
     def _run(self, caps: CommandCaps | None, call: Callable[[Any], T], *, login: bool = False) -> T:
         imap = self._imap
+        if login:
+            self.login_sent = False
         if self._expired:
             raise DeadlineExceeded
         if imap.discarded:
@@ -159,7 +163,10 @@ class ReadOnlySession:
         try:
             return call(self._client)
         except Exception as exc:
-            failure = self._classify(exc, login=login, sent=imap.commands_started > sent)
+            started = imap.commands_started > sent
+            if login:
+                self.login_sent = started
+            failure = self._classify(exc, login=login, sent=started)
         except BaseException:
             self.close()
             raise
