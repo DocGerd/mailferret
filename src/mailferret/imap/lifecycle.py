@@ -94,13 +94,7 @@ class AccountSession:
                 self._release(session)
                 raise
             self._release(session)
-            if self._deadline_passed():
-                raise DeadlineExceeded
         raise failure
-
-    def _deadline_passed(self) -> bool:
-        with self._state:
-            return self._expired
 
     def _acquire(self) -> ReadOnlySession:
         with self._state:
