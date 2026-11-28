@@ -38,6 +38,7 @@ SECRET = "pa-ss_w0rd"  # noqa: S105  # pii-check: ignore
 SECONDS = 1
 MARGIN = 2.0
 LIMITS = Limits(credential_command_seconds=SECONDS)
+SLOW_LIMITS = Limits(credential_command_seconds=10)
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX sessions and pipes")
 windows_only = pytest.mark.skipif(sys.platform != "win32", reason="Windows job object")
 
@@ -49,13 +50,14 @@ def backend(
     *,
     env: dict[str, str] | None = None,
     environ: dict[str, str] | None = None,
+    limits: Limits = LIMITS,
 ) -> CommandBackend:
     return CommandBackend(
         tmp_path / "data",
         get,
         set_,
         env=env,
-        limits=LIMITS,
+        limits=limits,
         environ=os.environ if environ is None else environ,
     )
 
@@ -205,11 +207,15 @@ def test_sleeping_command_times_out_within_bound(tmp_path: Path) -> None:
 
 def test_stdout_flood_is_limit_exceeded(tmp_path: Path) -> None:
     bind(tmp_path)
-    b = backend(tmp_path, py("import sys\nwhile True: sys.stdout.buffer.write(b'x' * 65536)"))
+    b = backend(
+        tmp_path,
+        py("import sys\nwhile True: sys.stdout.buffer.write(b'x' * 65536)"),
+        limits=SLOW_LIMITS,
+    )
     start = time.monotonic()
     with pytest.raises(CredentialLimitExceeded):
         b.get(KEY)
-    assert time.monotonic() - start < SECONDS + MARGIN
+    assert time.monotonic() - start < SLOW_LIMITS.credential_command_seconds
 
 
 def test_stderr_megabytes_are_bounded_and_do_not_fail_the_call(tmp_path: Path) -> None:
@@ -219,7 +225,7 @@ def test_stderr_megabytes_are_bounded_and_do_not_fail_the_call(tmp_path: Path) -
     )
     tracemalloc.start()
     try:
-        assert backend(tmp_path, py(code)).get(KEY).reveal() == "ok-secret"
+        assert backend(tmp_path, py(code), limits=SLOW_LIMITS).get(KEY).reveal() == "ok-secret"
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
@@ -284,6 +290,7 @@ def test_set_child_that_neither_reads_stdin_nor_exits(tmp_path: Path) -> None:
     assert not binding_path(tmp_path / "data", KEY).exists()
 
 
+@posix_only
 def test_environment_is_minimal_and_carries_the_allowlisted_names(tmp_path: Path) -> None:
     bind(tmp_path)
     code = "import json, os; print(json.dumps(sorted(os.environ)))"

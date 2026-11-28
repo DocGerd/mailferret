@@ -141,6 +141,7 @@ def test_status_channel_needs_an_env_hook(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.skipif(not hasattr(os, "waitid"), reason="needs waitid")
 def test_same_session_leftover_is_killed_after_a_normal_exit(tmp_path: Path) -> None:
     pid_file = tmp_path / "leftover.pid"
     code = (
