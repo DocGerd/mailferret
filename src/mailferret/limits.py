@@ -16,6 +16,10 @@ MIB: Final = 1024 * KIB
 # its margin are in tests/unit/imap/test_overhead.py.
 LINE_OVERHEAD_BYTES: Final = 424
 
+# Line bytes allowed per folder-list line beyond its overhead in a non-FETCH response (L-32).
+# Not a [limits] key.
+LIST_LINE_ALLOWANCE_BYTES: Final = 512
+
 # Line bytes (with their overhead) one fetched message is allowed in a FETCH response (L-32).
 # Proposed; to be re-measured on real mail in D5. Not a [limits] key.
 FETCH_LINE_ALLOWANCE_BYTES: Final = 32 * KIB
@@ -121,6 +125,10 @@ class Limits(BaseModel):
             problem = violation(key, getattr(self, key))
             if problem:
                 raise ValueError(problem)
+        if self.max_response_line_bytes <= self.max_line_bytes + LINE_OVERHEAD_BYTES:
+            raise ValueError(
+                "max_response_line_bytes must exceed max_line_bytes plus one line's overhead"
+            )
         return self
 
     @property

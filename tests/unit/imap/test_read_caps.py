@@ -21,7 +21,14 @@ from mailferret.imap import (
     max_messages,
 )
 from mailferret.imap.caps import default_caps, unclamped_total
-from mailferret.limits import FETCH_LINE_ALLOWANCE_BYTES, KIB, LINE_OVERHEAD_BYTES, MIB, Limits
+from mailferret.limits import (
+    FETCH_LINE_ALLOWANCE_BYTES,
+    KIB,
+    LINE_OVERHEAD_BYTES,
+    LIST_LINE_ALLOWANCE_BYTES,
+    MIB,
+    Limits,
+)
 from tests.support.imap_fake import FakeImapServer, Flood, Literal
 from tests.unit.imap.conftest import Opener
 from tests.unit.imap.support import arm, line, make_sink
@@ -425,7 +432,8 @@ def test_line_totals_follow_the_split_charge_formula() -> None:
     limits = Limits()
     assert default_caps(limits).line_total == min(
         limits.max_response_line_bytes,
-        limits.max_line_bytes + limits.max_folders * (LINE_OVERHEAD_BYTES + 512),
+        limits.max_line_bytes
+        + limits.max_folders * (LINE_OVERHEAD_BYTES + LIST_LINE_ALLOWANCE_BYTES),
     )
     assert default_caps(limits).line_total > limits.max_line_bytes
     assert (
@@ -448,3 +456,21 @@ def test_a_batch_fits_under_the_line_ceiling_as_well_as_the_response_total() -> 
     )
     lowered = Limits(max_response_line_bytes=limits.max_line_bytes + 3 * FETCH_LINE_ALLOWANCE_BYTES)
     assert max_messages(lowered, None) == 3
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [
+        Limits(),
+        Limits(max_line_bytes=64 * KIB),
+        Limits(max_response_line_bytes=300 * KIB, max_line_bytes=64 * KIB),
+        Limits(max_command_response_bytes=4 * MIB),
+    ],
+)
+@pytest.mark.parametrize("item", [None, LiteralItem.HEADER, LiteralItem.PART])
+def test_a_sized_batch_keeps_its_line_allowance_under_l32(
+    limits: Limits, item: LiteralItem | None
+) -> None:
+    n = max_messages(limits, item)
+    assert n >= 1
+    assert n * FETCH_LINE_ALLOWANCE_BYTES + limits.max_line_bytes <= limits.max_response_line_bytes

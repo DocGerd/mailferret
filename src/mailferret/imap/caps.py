@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from mailferret.limits import FETCH_LINE_ALLOWANCE_BYTES, LINE_OVERHEAD_BYTES, Limits
+from mailferret.limits import (
+    FETCH_LINE_ALLOWANCE_BYTES,
+    LINE_OVERHEAD_BYTES,
+    LIST_LINE_ALLOWANCE_BYTES,
+    Limits,
+)
 
 
 class LiteralItem(Enum):
@@ -46,7 +51,8 @@ def default_caps(limits: Limits) -> CommandCaps:
         LiteralItem.HEADER.limit_id,
         min(
             limits.max_response_line_bytes,
-            limits.max_line_bytes + limits.max_folders * (LINE_OVERHEAD_BYTES + 512),
+            limits.max_line_bytes
+            + limits.max_folders * (LINE_OVERHEAD_BYTES + LIST_LINE_ALLOWANCE_BYTES),
         ),
     )
 
