@@ -19,6 +19,7 @@ from mailferret.content.html import (
     NOTE_HIDDEN,
     NOTE_LIMIT_BODY,
     NOTE_LIMIT_PART,
+    NOTE_NESTING,
     NOTE_PARSE_FAILED,
     NOTE_STRUCTURE,
     html_to_text,
@@ -94,6 +95,42 @@ HIDDEN_VECTORS = {
     "template": "<template>{c}</template>",
     "iframe": "<iframe>{c}</iframe>",
     "nested_in_hidden": '<div style="display:none"><p><b>{c}</b></p></div>',
+    "important_spaced": '<span style="display:none ! important">{c}</span>',
+    "important_comment": '<span style="display:none !/**/important">{c}</span>',
+    "important_escaped": '<span style="display:none !\\69mportant">{c}</span>',
+    "class_case_sheet": "<style>.Hide{{display:none}}</style><span class='hIDE'>{c}</span>",
+    "id_case_sheet": "<style>#Box{{display:none}}</style><span id='bOX'>{c}</span>",
+    "class_escaped_selector": "<style>.\\68 ide{{display:none}}</style><b class='hide'>{c}</b>",
+    "cdo_cdc": "<style><!-- .h{{display:none}} --></style><span class='h'>{c}</span>",
+    "charset_rule": '<style>@charset "utf-8"; .h{{display:none}}</style><b class="h">{c}</b>',
+    "import_rule": "<style>@import url(a.css);.h{{display:none}}</style><b class='h'>{c}</b>",
+    "after_at_block": (
+        "<style>@media print{{.x{{color:red}}}} .h{{display:none}}</style><b class='h'>{c}</b>"
+    ),
+    "after_failed_rule": "<style>a;b;.h{{display:none}}</style><b class='h'>{c}</b>",
+    "string_with_comment_start": "<span style=\"content:'/*';display:none\">{c}</span>",
+    "escaped_comment_start": '<span style="x:\\/* ;display:none;y:z */">{c}</span>',
+    "unclosed_comment_style": '<span style="/* display:none">{c}</span>',
+    "font_zero_shorthand": '<span style="font:0/0 a">{c}</span>',
+    "font_small_shorthand": '<span style="font:italic bold 0px serif">{c}</span>',
+    "dialog": "<dialog>{c}</dialog>",
+    "datalist": "<datalist><option>{c}</option></datalist>",
+    "svg_desc": "<svg><desc>{c}</desc></svg>",
+    "svg_defs": "<svg><defs><text>{c}</text></defs></svg>",
+    "svg_metadata": "<svg><metadata>{c}</metadata></svg>",
+    "padded_display_inline": '<span style="display:' + " " * 5000 + 'none">{c}</span>',
+    "padded_font_size": '<span style="font-size:0.' + "0" * 5000 + 'px">{c}</span>',
+    "padded_opacity": '<span style="opacity:0.' + "0" * 5000 + '">{c}</span>',
+    "padded_display_sheet": "<style>.h{{display:"
+    + " " * 20000
+    + "none}}</style><b class=h>{c}</b>",
+    "soft_child_text_stays_hidden": '<div style="font-size:0">{c}<b>{c}</b></div>',
+    "hidden_after_filler_rules": (
+        "<style>" + ".f{{color:red}}" * 6000 + ".h{{display:none}}</style><b class=h>{c}</b>"
+    ),
+    "color_on_parent_bg": (
+        '<div style="background:#123456"><span style="color:#123456">{c}</span></div>'
+    ),
 }
 
 
@@ -116,6 +153,17 @@ def test_hidden_vector_is_removed(name: str) -> None:
         "<style>.h{{display:none}}</style><span class='shown'>{c}</span>",
         "<style>@media (max-width:480px){{.d{{display:none}}}}</style><b class='d'>{c}</b>",
         "<style>div span{{display:none}}</style><div><span>{c}</span></div>",
+        '<div style="font-size:0"><div style="font-size:13px">{c}</div></div>',
+        '<div style="font:0/0 a"><div style="font-size:14px">{c}</div></div>',
+        '<div style="visibility:hidden"><span style="visibility:visible">{c}</span></div>',
+        '<div style="color:#fff"><span style="color:#000">{c}</span></div>',
+        '<div style="background:#000">'
+        '<span style="background:transparent;color:#fff">{c}</span></div>',
+        '<span style="background:url(x.png);color:#fff">{c}</span>',
+        '<span style="background:linear-gradient(#000,#111);color:#fff">{c}</span>',
+        '<table bgcolor="#000"><tr><td><font color="#fff">{c}</font></td></tr></table>',
+        "<dialog open>{c}</dialog>",
+        "<style>.f{{color:red}}</style><b class='f'>{c}</b>",
     ],
 )
 def test_visible_content_is_kept(visible: str) -> None:
@@ -333,12 +381,21 @@ def test_output_budget_stops_the_walk(monkeypatch: pytest.MonkeyPatch) -> None:
         walked.append(len(result[0]))
         return result
 
+    entered: list[int] = []
+    original_enter = html_module._enter
+
+    def count_enter(*args: Any) -> None:
+        entered.append(1)
+        original_enter(*args)
+
     monkeypatch.setattr(html_module, "_walk", spy)
+    monkeypatch.setattr(html_module, "_enter", count_enter)
     result = html_to_text("<p>x</p>" * 200_000, limits=limits)
     assert result.truncated
     assert NOTE_LIMIT_BODY in result.notes
     assert len(result.text) <= 100
     assert walked and walked[0] <= 3 * 100 + 3
+    assert len(entered) < 1000
 
 
 def test_entity_declarations_are_not_expanded() -> None:
@@ -560,12 +617,69 @@ def test_adversarial_css_is_linear(name: str) -> None:
     assert time.monotonic() - started < 1.0
 
 
-def test_unclosed_comment_hides_the_rest_of_the_declaration_list() -> None:
-    assert CANARY not in _text(f'<span style="display:none /*">{CANARY}</span>')
-    assert _text(f'<span style="color:red /*">{CANARY}</span>') == CANARY
+def test_unclosed_comment_fails_closed() -> None:
+    for style in ("display:none /*", "color:red /*", "/* display:none", "a:b;/*"):
+        result = html_to_text(f'<span style="{style}">{CANARY}</span>')
+        assert CANARY not in result.text
+        assert NOTE_HIDDEN in result.notes
 
 
-def test_oversized_inline_style_is_hidden_not_parsed() -> None:
-    padded = " " * 20_000 + "display:none"
-    assert CANARY not in _text(f'<span style="{padded}">{CANARY}</span>')
-    assert CANARY not in _text(f'<span style="{"a:b;" * 5000}display:none">{CANARY}</span>')
+def test_unclosed_comment_in_a_stylesheet_ends_the_sheet_like_a_browser() -> None:
+    html = f"<style>.h{{display:none}} /* .k{{display:none}}</style><b class=k>{CANARY}</b>"
+    assert _text(html) == CANARY
+
+
+def test_oversized_inline_style_fails_closed_with_a_note() -> None:
+    harmless = "color:red;" * 1000
+    assert len(harmless) > html_module._MAX_STYLE_CHARS
+    result = html_to_text(f'<p>a</p><span style="{harmless}">{CANARY}</span>')
+    assert result.text == "a"
+    assert NOTE_HIDDEN in result.notes
+    short = html_to_text(f'<span style="{"color:red;" * 100}">{CANARY}</span>')
+    assert short.text == CANARY
+    assert NOTE_HIDDEN not in short.notes
+
+
+def test_many_filler_rules_do_not_hide_the_hiding_rule() -> None:
+    css = ".f{color:red}" * 10_000 + ".h{display:none}"
+    assert CANARY not in _text(f"<style>{css}</style><b class=h>{CANARY}</b>")
+
+
+def test_soft_hidden_text_is_noted_and_overridable_per_child() -> None:
+    html = f'<div style="font-size:0">{CANARY}<b style="font-size:12px">shown</b></div>'
+    result = html_to_text(html)
+    assert result.text == "shown"
+    assert NOTE_HIDDEN in result.notes
+
+
+def test_tail_of_a_soft_hidden_element_uses_the_parents_state() -> None:
+    html = '<p>a<span style="font-size:0">X</span>b</p>'
+    assert _text(html) == "ab"
+    assert _text('<div style="font-size:0"><i></i>X</div>') == ""
+
+
+def test_hidden_link_and_image_are_not_emitted() -> None:
+    html = (
+        '<div style="font-size:0"><a href="https://example.com/x">t</a>'
+        '<img alt="alt text"></div>shown'
+    )
+    assert _text(html) == "shown"
+
+
+def test_nesting_limit_is_reported() -> None:
+    result = html_to_text("<font>" * 300 + "tail text")
+    assert result.truncated
+    assert NOTE_NESTING in result.notes
+    assert html_to_text("<font>" * 100 + "tail text").notes == ()
+
+
+def test_variation_selectors_are_stripped() -> None:
+    vs16, heart = chr(0xFE0F), chr(0x2764)
+    hidden = "".join(chr(0xE0100 + n) for n in (1, 2, 3))
+    assert strip_invisible(f"a{hidden}b") == ("ab", True)
+    assert strip_invisible(f"a{chr(0xFE00)}{chr(0xFE01)}b")[0] == "ab"
+    assert strip_invisible(f"a{chr(0xFE01)}b")[0] == "ab"
+    assert strip_invisible(f"a{vs16}{vs16}b")[0] == "ab"
+    assert strip_invisible(f"{heart}{vs16} ok") == (f"{heart}{vs16} ok", False)
+    assert strip_invisible(f" {vs16}x")[0] == " x"
+    assert strip_format(f"a{hidden}b") == (f"a{hidden}b", False)

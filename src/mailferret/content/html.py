@@ -14,12 +14,22 @@ or an ancestor's colour scheme is kept.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Final
 
 from lxml import etree
 
 from mailferret.content.charset import decode_text
+from mailferret.content.css import (
+    ColorValue,
+    Sheet,
+    Style,
+    evaluate,
+    first_color,
+    normalize,
+    parse_declarations,
+    parse_stylesheet,
+)
 from mailferret.content.invisible import strip_invisible
 from mailferret.content.truncate import truncate_chars, truncate_text_bytes
 from mailferret.limits import Limits
@@ -31,14 +41,13 @@ NOTE_FORMAT: Final = "format_controls_removed"
 NOTE_PARSE_FAILED: Final = "html_parse_failed"
 NOTE_LIMIT_PART: Final = "limit_exceeded:L-02"
 NOTE_LIMIT_BODY: Final = "limit_exceeded:L-03"
+NOTE_NESTING: Final = "html_nesting_limit"
 
 _DEFAULT_LIMITS: Final = Limits()
 _MAX_URL_CHARS: Final = 1024
 _MAX_ALT_CHARS: Final = 200
-_MAX_STYLE_RULES: Final = 5000
 _BUDGET_FACTOR: Final = 3  # blank runs shrink in _tidy; a worst case keeps one char in three
 _LINK_SCHEMES: Final = ("http://", "https://", "mailto:")
-_MAX_VALUE_CHARS: Final = 256  # a CSS value longer than this is not a number or a colour
 _MAX_STYLE_CHARS: Final = 8192  # a longer inline style is treated as hidden (padding attack)
 # C0 and C1 controls other than tab, LF and CR (as headers._CONTROLS), plus noncharacters.
 _CONTROLS: Final = dict.fromkeys(
@@ -50,7 +59,20 @@ _CONTROLS: Final = dict.fromkeys(
 _STRUCTURAL: Final = frozenset({"head", "script", "style", "title", "meta", "link", "base"})
 # Skipped with their subtree and noted as hidden.
 _NEVER_SHOWN: Final = frozenset(
-    {"template", "iframe", "object", "embed", "applet", "canvas", "noembed", "frameset"}
+    {
+        "template",
+        "iframe",
+        "object",
+        "embed",
+        "applet",
+        "canvas",
+        "noembed",
+        "frameset",
+        "datalist",
+        "desc",
+        "defs",
+        "metadata",
+    }
 )
 _BLOCK: Final = frozenset(
     {
@@ -86,24 +108,6 @@ _SPACES: Final = " \t\r\n\f\v" + "".join(
     map(chr, (0xA0, 0x1680, *range(0x2000, 0x200B), 0x2028, 0x2029, 0x202F, 0x205F, 0x3000))
 )
 _WHITESPACE: Final = re.compile(f"[{re.escape(_SPACES)}]+")
-_CSS_ESCAPE: Final = re.compile(r"\\([0-9a-fA-F]{1,6})[ \t\n]?|\\(.)", re.DOTALL)
-_NUMBER: Final = re.compile(r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))([a-z%]*)")
-_SIMPLE_SELECTOR: Final = re.compile(r"([a-z][a-z0-9]*)?(?:([.#])([a-z_][\w-]*))?")
-_HEX_COLOR: Final = re.compile(r"#([0-9a-f]{3,8})")
-_RGB_COLOR: Final = re.compile(
-    r"rgba?\(\s*([\d.]+%?)[\s,]+([\d.]+%?)[\s,]+([\d.]+%?)(?:[\s,/]+([\d.]+%?))?\s*\)"
-)
-_NAMED_COLORS: Final = {
-    "white": (255, 255, 255),
-    "black": (0, 0, 0),
-    "red": (255, 0, 0),
-    "yellow": (255, 255, 0),
-    "silver": (192, 192, 192),
-    "gray": (128, 128, 128),
-}
-_FAR: Final = 1000.0
-
-Color = tuple[int, int, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,268 +137,6 @@ def strip_body_text(text: str, limits: Limits = _DEFAULT_LIMITS) -> PlainText:
     cut = truncate_chars(cleaned, limits.max_body_chars)
     notes = ((NOTE_FORMAT,) if removed else ()) + ((NOTE_LIMIT_BODY,) if cut.truncated else ())
     return PlainText(cut.text, cut.truncated, notes)
-
-
-# --- CSS -------------------------------------------------------------------------------------
-
-
-def _unescape(match: re.Match[str]) -> str:
-    hexa, char = match.group(1), match.group(2)
-    if char is not None:
-        return str(char)
-    code = int(hexa, 16)
-    return chr(code) if 0 < code <= 0x10FFFF and not 0xD800 <= code <= 0xDFFF else ""
-
-
-def _strip_comments(text: str) -> str:
-    """Replace CSS comments with a space in one pass; an unclosed comment drops the rest."""
-    parts: list[str] = []
-    index = 0
-    while True:
-        start = text.find("/*", index)
-        if start < 0:
-            parts.append(text[index:])
-            break
-        parts.append(text[index:start])
-        parts.append(" ")
-        end = text.find("*/", start + 2)
-        if end < 0:
-            break
-        index = end + 2
-    return "".join(parts)
-
-
-def _normalize_css(text: str) -> str:
-    return _CSS_ESCAPE.sub(_unescape, _strip_comments(text)).lower()
-
-
-def _declarations(style: str) -> list[tuple[str, str]]:
-    result: list[tuple[str, str]] = []
-    for part in _normalize_css(style).split(";"):
-        name, sep, value = part.partition(":")
-        if not sep:
-            continue
-        value = value.replace("!important", "").strip().strip("\"'").strip()
-        if len(value) > _MAX_VALUE_CHARS:
-            continue
-        result.append((name.strip(), value))
-    return result
-
-
-def _number(value: str) -> tuple[float, str] | None:
-    value = value.strip()
-    match = _NUMBER.fullmatch(value) if len(value) <= _MAX_VALUE_CHARS else None
-    if match is None:
-        return None
-    try:
-        return float(match.group(1)), match.group(2)
-    except ValueError:
-        return None
-
-
-def _channel(token: str) -> int | None:
-    try:
-        if token.endswith("%"):
-            return round(float(token[:-1]) * 2.55)
-        return round(float(token))
-    except ValueError:
-        return None
-
-
-def _color(value: str) -> Color | str | None:
-    """Return an RGB triple, ``"transparent"``, or ``None`` when the value is not understood."""
-    value = value.strip()
-    if len(value) > _MAX_VALUE_CHARS:
-        return None
-    if value == "transparent":
-        return "transparent"
-    if value in _NAMED_COLORS:
-        return _NAMED_COLORS[value]
-    hexa = _HEX_COLOR.fullmatch(value)
-    if hexa:
-        digits = hexa.group(1)
-        if len(digits) in (3, 4):
-            digits = "".join(c * 2 for c in digits)
-        if len(digits) in (6, 8):
-            if len(digits) == 8 and digits[6:] == "00":
-                return "transparent"
-            return int(digits[0:2], 16), int(digits[2:4], 16), int(digits[4:6], 16)
-        return None
-    rgb = _RGB_COLOR.fullmatch(value)
-    if rgb:
-        red, green, blue = (_channel(rgb.group(i)) for i in (1, 2, 3))
-        if red is None or green is None or blue is None:
-            return None
-        alpha = _number(rgb.group(4)) if rgb.group(4) else None
-        if alpha is not None and alpha[0] <= 0:
-            return "transparent"
-        return red, green, blue
-    return None
-
-
-def _tokens(value: str) -> list[str]:
-    """Split on whitespace outside parentheses in one pass."""
-    tokens: list[str] = []
-    depth = 0
-    start = 0
-    for index, char in enumerate(value):
-        if char == "(":
-            depth += 1
-        elif char == ")":
-            depth = max(depth - 1, 0)
-        elif char.isspace() and depth == 0:
-            if index > start:
-                tokens.append(value[start:index])
-            start = index + 1
-    if start < len(value):
-        tokens.append(value[start:])
-    return tokens
-
-
-def _first_color(value: str) -> Color | str | None:
-    for token in _tokens(value):
-        found = _color(token)
-        if found is not None:
-            return found
-    return None
-
-
-def _zero_or_less(value: str) -> bool:
-    parsed = _number(value)
-    return parsed is not None and parsed[0] <= 0
-
-
-def _tiny(number: tuple[float, str]) -> bool:
-    return number[0] <= 0 or (number[0] <= 1 and number[1] in ("px", "pt"))
-
-
-def _off_screen(value: str) -> bool:
-    parsed = _number(value)
-    return parsed is not None and parsed[0] <= -_FAR and parsed[1] in ("", "px", "pt", "em", "rem")
-
-
-def _hidden_declarations(decls: list[tuple[str, str]]) -> bool:
-    """Whether any single declaration, or the overflow and size pair, hides the content."""
-    seen = dict(decls)
-    clipped = seen.get("overflow") in ("hidden", "clip") or seen.get("overflow-y") in (
-        "hidden",
-        "clip",
-    )
-    for name, value in decls:
-        number = _number(value)
-        if name == "display" and value == "none":
-            return True
-        if name == "visibility" and value in ("hidden", "collapse"):
-            return True
-        if name == "font-size" and number is not None and _tiny(number):
-            return True
-        if name == "opacity" and number is not None and number[0] <= 0:
-            return True
-        if name == "mso-hide" and value == "all":
-            return True
-        if name in ("left", "right", "top", "bottom", "text-indent", "margin-left") and _off_screen(
-            value
-        ):
-            return True
-        if name == "clip-path" and value.replace(" ", "").startswith("inset(100%"):
-            return True
-        if (
-            name in ("height", "max-height", "width", "max-width")
-            and clipped
-            and _zero_or_less(value)
-        ):
-            return True
-        if name == "color" and _color(value) == "transparent":
-            return True
-    return False
-
-
-def _own_background(decls: list[tuple[str, str]]) -> Color | str | None:
-    found: Color | str | None = None
-    for name, value in decls:
-        if name in ("background", "background-color"):
-            parsed = _first_color(value)
-            if parsed is not None:
-                found = parsed
-    return found
-
-
-def _own_color(decls: list[tuple[str, str]]) -> Color | str | None:
-    found: Color | str | None = None
-    for name, value in decls:
-        if name == "color":
-            parsed = _color(value)
-            if parsed is not None:
-                found = parsed
-    return found
-
-
-def _camouflaged(color: Color | str | None, background: Color | str | None) -> bool:
-    """Text colour equal to the background; white on an unset background counts as white."""
-    if color is None or isinstance(color, str):
-        return False
-    return color == (255, 255, 255) if background is None else color == background
-
-
-@dataclass(slots=True)
-class _Sheet:
-    classes: set[str]
-    ids: set[str]
-    tags: set[str]
-    tag_classes: set[tuple[str, str]]
-
-    def hides(self, tag: str, classes: list[str], ident: str | None) -> bool:
-        if tag in self.tags or (ident is not None and ident in self.ids):
-            return True
-        return any(c in self.classes or (tag, c) in self.tag_classes for c in classes)
-
-
-def _parse_sheet(css: str) -> _Sheet:
-    """Collect top-level rules whose selector is one tag, ``.class``, ``#id`` or ``tag.class``."""
-    sheet = _Sheet(set(), set(), set(), set())
-    text = _normalize_css(css)
-    depth = 0
-    start = 0
-    selector = ""
-    rules = 0
-    for match in re.finditer(r"[{}]", text):
-        char = match.group()
-        if char == "{":
-            if depth == 0:
-                selector = text[start : match.start()]
-                body_start = match.end()
-            depth += 1
-        else:
-            depth = max(depth - 1, 0)
-            if depth == 0:
-                body = text[body_start : match.start()] if selector else ""
-                start = match.end()
-                rules += 1
-                if rules > _MAX_STYLE_RULES:
-                    break
-                if selector.strip().startswith("@") or "{" in body:
-                    continue
-                if _hidden_declarations(_declarations(body)):
-                    _add_selectors(sheet, selector)
-                selector = ""
-    return sheet
-
-
-def _add_selectors(sheet: _Sheet, selectors: str) -> None:
-    for raw in selectors.split(","):
-        match = _SIMPLE_SELECTOR.fullmatch(raw.strip())
-        if match is None or not raw.strip():
-            continue
-        tag, kind, name = match.groups()
-        if kind is None:
-            if tag:
-                sheet.tags.add(tag)
-        elif kind == "#":
-            sheet.ids.add(name)
-        elif tag:
-            sheet.tag_classes.add((tag, name))
-        else:
-            sheet.classes.add(name)
 
 
 # --- output ----------------------------------------------------------------------------------
@@ -486,71 +228,113 @@ def _safe_url(href: str) -> str | None:
 _ENTER, _EXIT, _TAIL = 0, 1, 2
 
 
+def _camouflaged(color: ColorValue, background: ColorValue) -> bool:
+    """Text colour equal to the background; white on an unset background counts as white."""
+    if color == "transparent":
+        return True
+    if not isinstance(color, tuple) or background == "image":
+        return False
+    return color == (255, 255, 255) if background is None else color == background
+
+
+@dataclass(frozen=True, slots=True)
+class _State:
+    """Inherited presentation: a child can override colour, size and visibility."""
+
+    background: ColorValue = None
+    color: ColorValue = None
+    tiny: bool = False
+    invisible: bool = False
+
+    @property
+    def soft_hidden(self) -> bool:
+        return self.tiny or self.invisible or _camouflaged(self.color, self.background)
+
+
 @dataclass(slots=True)
-class _Counts:
+class _Flags:
     hidden: bool = False
     structure: bool = False
+    nesting: bool = False
 
 
 @dataclass(slots=True)
 class _Walk:
-    sheet: _Sheet
+    sheet: Sheet
     writer: _Writer
-    counts: _Counts
+    flags: _Flags
     pre_depth: int = 0
-    lists: list[list[Any]] = None  # type: ignore[assignment]
-    rows: list[list[int | None]] = None  # type: ignore[assignment]
-    links: list[tuple[str | None, int, int]] = None  # type: ignore[assignment]
+    lists: list[list[Any]] = field(default_factory=list)
+    rows: list[list[int | None]] = field(default_factory=list)
+    links: list[tuple[str | None, int, int]] = field(default_factory=list)
 
-    def __post_init__(self) -> None:
-        self.lists = []
-        self.rows = []
-        self.links = []
+    def text(self, raw: str, soft: bool) -> None:
+        if not raw:
+            return
+        if soft:
+            if raw.strip():
+                self.flags.hidden = True
+            return
+        if self.pre_depth:
+            self.writer.pre(raw)
+        else:
+            self.writer.text(raw)
 
 
-def _classify(
-    el: Any, sheet: _Sheet, bg: Color | str | None
-) -> tuple[bool, bool, Color | str | None]:
-    """Return (structural, hidden, effective background) for an element."""
+def _attribute_style(el: Any) -> Style:
+    """Presentation attributes (``bgcolor``, ``<font color>``), weaker than any CSS."""
+    attrs = el.attrib
+    background = first_color(normalize(attrs.get("bgcolor", ""))) if "bgcolor" in attrs else None
+    color = None
+    if el.tag == "font" and "color" in attrs:
+        color = first_color(normalize(attrs.get("color", "")))
+    return Style(color=color, background=background)
+
+
+def _classify(el: Any, walk: _Walk, inherited: _State) -> tuple[bool, bool, _State]:
+    """Return (structural, subtree hidden, the element's own state)."""
     tag: str = el.tag
     if tag in _STRUCTURAL:
-        return True, False, bg
+        return True, False, inherited
     attrs = el.attrib
-    style = attrs.get("style", "")
-    if len(style) > _MAX_STYLE_CHARS:
-        return False, True, bg
-    decls = _declarations(style) if style else []
-    own_bg = _own_background(decls)
-    if own_bg is None and "bgcolor" in attrs:
-        own_bg = _first_color(_normalize_css(attrs.get("bgcolor", "")))
-    effective = own_bg if own_bg is not None else bg
-    color = _own_color(decls)
-    if color is None and tag == "font" and "color" in attrs:
-        color = _color(_normalize_css(attrs.get("color", "")))
-    classes = attrs.get("class", "").split() if "class" in attrs else []
     hidden = (
         tag in _NEVER_SHOWN
         or "hidden" in attrs
+        or (tag == "dialog" and "open" not in attrs)
         or (tag == "input" and attrs.get("type", "").lower() == "hidden")
-        or _hidden_declarations(decls)
-        or sheet.hides(tag, classes, attrs.get("id"))
-        or _camouflaged(color, effective if own_bg is None else own_bg)
     )
-    return False, hidden, effective
+    raw_style = attrs.get("style", "")
+    if len(raw_style) > _MAX_STYLE_CHARS:
+        return False, True, inherited
+    classes = [c.lower() for c in attrs.get("class", "").split()]
+    ident = attrs.get("id")
+    style = _attribute_style(el).merge(
+        walk.sheet.style_for(tag, classes, ident.lower() if ident else None)
+    )
+    if raw_style:
+        declarations, unclosed = parse_declarations(raw_style)
+        hidden = hidden or unclosed
+        style = style.merge(evaluate(declarations))
+    hidden = hidden or style.hidden
+    background = inherited.background if style.background is None else style.background
+    color = inherited.color if style.color is None else style.color
+    tiny = inherited.tiny if style.tiny is None else style.tiny
+    invisible = inherited.invisible if style.invisible is None else style.invisible
+    return False, hidden, _State(background, color, tiny, invisible)
 
 
-def _enter(el: Any, walk: _Walk, stack: list[tuple[int, Any, Any]], bg: Color | str | None) -> None:
+def _enter(el: Any, walk: _Walk, stack: list[tuple[int, Any, _State]], inherited: _State) -> None:
+    stack.append((_TAIL, el, inherited))
     if not isinstance(el.tag, str):
-        stack.append((_TAIL, el, None))
         return
-    structural, hidden, effective = _classify(el, walk.sheet, bg)
+    structural, hidden, state = _classify(el, walk, inherited)
     if structural or hidden:
         if structural:
-            walk.counts.structure = True
+            walk.flags.structure = True
         else:
-            walk.counts.hidden = True
-        stack.append((_TAIL, el, None))
+            walk.flags.hidden = True
         return
+    soft = state.soft_hidden
     tag: str = el.tag
     writer = walk.writer
     if tag in _PARAGRAPH:
@@ -581,19 +365,16 @@ def _enter(el: Any, walk: _Walk, stack: list[tuple[int, Any, Any]], bg: Color | 
             writer.defer(" | ")
         walk.rows[-1][0] = writer.length
     elif tag == "a":
-        walk.links.append((_safe_url(el.get("href", "")), writer.length, len(writer.parts)))
+        url = None if soft else _safe_url(el.get("href", ""))
+        walk.links.append((url, writer.length, len(writer.parts)))
     elif tag == "img":
         alt = _WHITESPACE.sub(" ", el.get("alt", "")).strip()[:_MAX_ALT_CHARS]
         if alt:
-            writer.text(f" [image: {alt}] ")
-    if walk.pre_depth:
-        writer.pre(el.text or "")
-    else:
-        writer.text(el.text or "")
-    stack.append((_TAIL, el, None))
-    stack.append((_EXIT, el, None))
+            walk.text(f" [image: {alt}] ", soft)
+    walk.text(el.text or "", soft)
+    stack.append((_EXIT, el, state))
     for child in reversed(el):
-        stack.append((_ENTER, child, effective))
+        stack.append((_ENTER, child, state))
 
 
 def _exit(el: Any, walk: _Walk) -> None:
@@ -619,35 +400,29 @@ def _exit(el: Any, walk: _Walk) -> None:
         writer.text(f" ({url})" if label.strip() else f" {url}")
 
 
-def _walk(root: Any, sheet: _Sheet, budget: int) -> tuple[str, _Counts, bool]:
-    walk = _Walk(sheet, _Writer(budget), _Counts())
-    stack: list[tuple[int, Any, Any]] = [(_ENTER, root, None)]
+def _walk(root: Any, sheet: Sheet, budget: int) -> tuple[str, _Flags, bool]:
+    walk = _Walk(sheet, _Writer(budget), _Flags())
+    stack: list[tuple[int, Any, _State]] = [(_ENTER, root, _State())]
     while stack and not walk.writer.full:
-        kind, el, bg = stack.pop()
+        kind, el, state = stack.pop()
         if kind == _ENTER:
-            _enter(el, walk, stack, bg)
+            _enter(el, walk, stack, state)
         elif kind == _EXIT:
             _exit(el, walk)
-        elif el is not root and el.tail:
-            if walk.pre_depth:
-                walk.writer.pre(el.tail)
-            else:
-                walk.writer.text(el.tail)
-    return "".join(walk.writer.parts), walk.counts, walk.writer.full
+        elif el is not root:
+            walk.text(el.tail or "", state.soft_hidden)
+    return "".join(walk.writer.parts), walk.flags, walk.writer.full
 
 
-def _collect_sheet(root: Any) -> _Sheet:
-    sheet = _Sheet(set(), set(), set(), set())
+def _collect_sheet(root: Any) -> Sheet:
+    sheet = Sheet()
     for style in root.iter("style"):
-        parsed = _parse_sheet(style.text or "")
-        sheet.classes |= parsed.classes
-        sheet.ids |= parsed.ids
-        sheet.tags |= parsed.tags
-        sheet.tag_classes |= parsed.tag_classes
+        sheet.update(parse_stylesheet(style.text or ""))
     return sheet
 
 
-def _parse(source: str) -> Any:
+def _parse(source: str) -> tuple[Any, bool]:
+    """Parse to a tree; the flag is set when libxml2 stopped at its nesting limit."""
     parser = etree.HTMLParser(
         encoding="utf-8",
         recover=True,
@@ -657,7 +432,9 @@ def _parse(source: str) -> Any:
         remove_pis=False,
         collect_ids=False,
     )
-    return etree.fromstring(source.encode("utf-8", errors="replace"), parser)
+    root = etree.fromstring(source.encode("utf-8", errors="replace"), parser)
+    limited = any(entry.type_name == "ERR_RESOURCE_LIMIT" for entry in parser.error_log)
+    return root, limited
 
 
 _BLANK_RUN: Final = re.compile(r"[ \t]+\n")
@@ -695,25 +472,29 @@ def html_to_text(
             notes.append(NOTE_FORMAT)
         if "<!--" in source:
             notes.append(NOTE_COMMENTS)
-        text, counts, full = _extract(source, _BUDGET_FACTOR * limits.max_body_chars + 3)
+        text, flags, full = _extract(source, _BUDGET_FACTOR * limits.max_body_chars + 3)
     except Exception:  # lxml and libxml2 can fail outside their documented errors
         return HtmlText("", False, (*notes, NOTE_PARSE_FAILED))
     text, late = _clean(text)
     if late and NOTE_FORMAT not in notes:
         notes.append(NOTE_FORMAT)
-    if counts.hidden:
+    if flags.hidden:
         notes.append(NOTE_HIDDEN)
-    if counts.structure:
+    if flags.structure:
         notes.append(NOTE_STRUCTURE)
+    if flags.nesting:
+        notes.append(NOTE_NESTING)
     result = truncate_chars(_tidy(text), limits.max_body_chars)
-    over = result.truncated or full
+    over = result.truncated or full or flags.nesting
     if over:
         notes.append(NOTE_LIMIT_BODY)
     return HtmlText(result.text, over or cut, tuple(notes))
 
 
-def _extract(source: str, budget: int) -> tuple[str, _Counts, bool]:
-    root = _parse(source)
+def _extract(source: str, budget: int) -> tuple[str, _Flags, bool]:
+    root, limited = _parse(source)
     if root is None:
-        return "", _Counts(), False
-    return _walk(root, _collect_sheet(root), budget)
+        return "", _Flags(nesting=limited), False
+    text, flags, full = _walk(root, _collect_sheet(root), budget)
+    flags.nesting = limited
+    return text, flags, full
