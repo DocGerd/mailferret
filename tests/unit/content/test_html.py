@@ -323,11 +323,22 @@ def test_deep_nesting_and_large_input_are_bounded() -> None:
         assert len(result.text) <= limits.max_body_chars, name
 
 
-def test_output_budget_stops_the_walk() -> None:
+def test_output_budget_stops_the_walk(monkeypatch: pytest.MonkeyPatch) -> None:
     limits = Limits(max_body_chars=100)
+    walked: list[int] = []
+    original = html_module._walk
+
+    def spy(*args: Any) -> Any:
+        result = original(*args)
+        walked.append(len(result[0]))
+        return result
+
+    monkeypatch.setattr(html_module, "_walk", spy)
     result = html_to_text("<p>x</p>" * 200_000, limits=limits)
     assert result.truncated
+    assert NOTE_LIMIT_BODY in result.notes
     assert len(result.text) <= 100
+    assert walked and walked[0] <= 3 * 100 + 3
 
 
 def test_entity_declarations_are_not_expanded() -> None:
