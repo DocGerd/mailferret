@@ -11,6 +11,11 @@ from pydantic import BaseModel, ConfigDict, model_validator
 KIB: Final = 1024
 MIB: Final = 1024 * KIB
 
+# Bytes charged per response line on top of its length (L-26): what imaplib keeps for one untagged
+# line of a new type. Not a [limits] key: lowering it would weaken the bound. The measurement and
+# its margin are in tests/unit/imap/test_overhead.py.
+LINE_OVERHEAD_BYTES: Final = 424
+
 CEILINGS: Final[Mapping[str, int]] = MappingProxyType(
     {
         "max_message_bytes": 25 * MIB,
