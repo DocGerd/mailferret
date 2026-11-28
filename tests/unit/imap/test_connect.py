@@ -12,12 +12,19 @@ from typing import Any
 
 import pytest
 
-from mailferret.imap import ConnectError, TlsMode, connect
-from mailferret.imap.transport import _bytes_pending, _client_buffer, _NoProbe
+from mailferret.imap import ConnectError, TlsMode
+from mailferret.imap import connect as _connect
+from mailferret.imap.probe import NoProbe as _NoProbe
+from mailferret.imap.probe import bytes_pending as _bytes_pending
+from mailferret.imap.probe import client_buffer as _client_buffer
 from mailferret.limits import Limits
 from tests.support.imap_fake import FakeImapServer, Stall, TlsMaterial
 
 HOST = "127.0.0.1"
+
+
+def connect(*args: Any, limits: Limits | None = None, **kwargs: Any) -> Any:
+    return _connect(*args, limits=limits or Limits(), **kwargs)
 
 
 def _verbs(server: FakeImapServer) -> list[str]:
@@ -254,7 +261,7 @@ def test_missing_buffer_probe_fails_before_starttls_is_sent(
     def no_probe(_imap: Any) -> Any:
         raise _NoProbe
 
-    monkeypatch.setattr("mailferret.imap.transport._client_buffer", no_probe)
+    monkeypatch.setattr("mailferret.imap.transport.client_buffer", no_probe)
     with pytest.raises(ConnectError) as err:
         connect(HOST, fake_imap_tls.port, TlsMode.STARTTLS, ca_file=tls_material.cert_file)
     assert err.value.code == "hook_unavailable"

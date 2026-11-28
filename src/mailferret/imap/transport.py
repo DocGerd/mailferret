@@ -1,12 +1,10 @@
-"""Connect: implicit TLS or STARTTLS, never plaintext (T-07, A§2.2)."""
+"""Connect: implicit TLS or STARTTLS, never plaintext, and always behind the guard (A§2.2)."""
 
 from __future__ import annotations
 
 import contextlib
 import imaplib
-import socket
 import ssl
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -14,83 +12,53 @@ from imapclient import IMAPClient  # type: ignore[import-untyped]
 from imapclient.exceptions import IMAPClientError  # type: ignore[import-untyped]
 from imapclient.imap4 import IMAP4WithTimeout  # type: ignore[import-untyped]
 from imapclient.imapclient import SocketTimeout  # type: ignore[import-untyped]
+from imapclient.tls import IMAP4_TLS  # type: ignore[import-untyped]
 
 from mailferret.imap.capabilities import Capabilities, parse_capabilities
-from mailferret.imap.errors import ConnectError
+from mailferret.imap.errors import ConnectError, HookBypassed, LimitBreach, ReadOnlyViolation
+from mailferret.imap.guard import GuardMixin, apply_line_cap
+from mailferret.imap.logging_pin import pin_imapclient_logging
+from mailferret.imap.probe import NoProbe, PreTlsBytes, client_buffer
+from mailferret.imap.selfcheck import check_hooks, check_instance
+from mailferret.imap.session import ReadOnlySession
 from mailferret.imap.tls import TlsMode, build_context
 from mailferret.limits import Limits
 
 
-class _PreTlsBytes(Exception):
-    """Bytes were buffered after the STARTTLS OK, before the handshake."""
+class GuardedPlain(GuardMixin, IMAP4WithTimeout):  # type: ignore[misc]
+    """Plain-socket IMAP4 (STARTTLS); the STARTTLS probe lives in the mixin."""
 
 
-class _NoProbe(Exception):
-    """Neither read buffer is reachable on this interpreter."""
-
-
-def _client_buffer(imap: Any) -> Any:
-    """The probe's read buffer by feature: ``_readbuf``, else ``file.peek``."""
-    if hasattr(imap, "_readbuf"):
-        readbuf = imap._readbuf
-        if isinstance(readbuf, bytes | bytearray | list | tuple):
-            return readbuf
-        raise _NoProbe
-    peek = getattr(getattr(imap, "file", None), "peek", None)
-    if callable(peek):
-        return peek
-    raise _NoProbe
-
-
-def _bytes_pending(imap: Any) -> bool:
-    """Whether any byte sits in the client buffer or the kernel buffer."""
-    buffer = _client_buffer(imap)
-    sock: socket.socket = imap.sock
-    previous = sock.gettimeout()
-    sock.settimeout(0.0)
-    try:
-        try:
-            if callable(buffer):
-                if buffer(1):
-                    return True
-            elif any(buffer) if isinstance(buffer, list | tuple) else len(buffer):
-                return True
-        except BlockingIOError:
-            pass
-        try:
-            return bool(sock.recv(1, socket.MSG_PEEK))
-        except (BlockingIOError, ssl.SSLWantReadError):
-            return False
-    finally:
-        sock.settimeout(previous)
-
-
-class _ProbedIMAP4(IMAP4WithTimeout):  # type: ignore[misc]
-    """Plain-socket IMAP4 whose STARTTLS OK is probed before the wrap."""
-
-    def _command_complete(self, name: str, tag: bytes) -> Any:
-        result = super()._command_complete(name, tag)
-        if name == "STARTTLS" and result[0] == "OK" and _bytes_pending(self):
-            raise _PreTlsBytes
-        return result
+class GuardedTLS(GuardMixin, IMAP4_TLS):  # type: ignore[misc]
+    """Implicit-TLS IMAP4, which is not an ``IMAP4WithTimeout`` and needs the mixin too."""
 
 
 class _Client(IMAPClient):  # type: ignore[misc]
+    _plain_cls: type[GuardMixin] = GuardedPlain
+    _tls_cls: type[GuardMixin] = GuardedTLS
+
+    def __init__(self, *args: Any, limits: Limits, **kwargs: Any) -> None:
+        self._mf_limits = limits
+        super().__init__(*args, **kwargs)
+
     def _create_IMAP4(self) -> Any:
+        if self.stream:
+            raise ConnectError("hook_unavailable")
+        connect_timeout = getattr(self._timeout, "connect", None)
         if self.ssl:
-            return super()._create_IMAP4()
-        return _ProbedIMAP4(self.host, self.port, getattr(self._timeout, "connect", None))
+            return self._tls_cls(
+                self.host, self.port, self.ssl_context, connect_timeout, limits=self._mf_limits
+            )
+        return self._plain_cls(self.host, self.port, connect_timeout, limits=self._mf_limits)
 
-
-@dataclass
-class Connection:
-    """An unauthenticated TLS session; ``capabilities`` are the post-TLS ones."""
-
-    client: Any
-    capabilities: Capabilities
-
-    def close(self) -> None:
-        _shutdown(self.client)
+    def has_capability(self, capability: str | bytes) -> bool:
+        """Hide ``LITERAL+`` so imapclient sends every literal synchronously (A§6)."""
+        name = (
+            capability.decode("ascii", "replace") if isinstance(capability, bytes) else capability
+        )
+        if name.upper() == "LITERAL+":
+            return False
+        return bool(super().has_capability(capability))
 
 
 def _shutdown(client: Any) -> None:
@@ -101,17 +69,15 @@ def _shutdown(client: Any) -> None:
 def _starttls(client: Any, ctx: ssl.SSLContext) -> Capabilities:
     """Upgrade; returns the capabilities imaplib re-read after the wrap, never the pre-TLS ones."""
     imap = client._imap
-    if not isinstance(getattr(imap, "untagged_responses", None), dict):
-        raise ConnectError("hook_unavailable")
     try:
-        _client_buffer(imap)
-    except _NoProbe:
+        client_buffer(imap)
+    except NoProbe:
         raise ConnectError("hook_unavailable") from None
     if not parse_capabilities(client.capabilities()).starttls:
         raise ConnectError("starttls_unavailable")
     try:
         client.starttls(ctx)
-    except _PreTlsBytes:
+    except PreTlsBytes:
         raise ConnectError("pre_tls_bytes") from None
     except (imaplib.IMAP4.error, IMAPClientError):
         raise ConnectError("starttls_refused") from None
@@ -123,11 +89,18 @@ def connect(
     port: int,
     mode: TlsMode,
     *,
+    limits: Limits,
     ca_file: Path | None = None,
-    limits: Limits | None = None,
-) -> Connection:
-    """Open a verified TLS session or raise ``ConnectError``; no credential is ever sent."""
-    limits = limits or Limits()
+) -> ReadOnlySession:
+    """Open a verified TLS session or raise ``ConnectError``; no credential is ever sent.
+
+    The returned session is unauthenticated and guarded: every hook has run, and the hook set,
+    the logging pin and the timeouts were checked first. DNS resolution is not bounded by
+    ``L-11``; the caller's `L-13` deadline is the bound.
+    """
+    check_hooks()
+    pin_imapclient_logging()
+    apply_line_cap(limits)
     timeout = SocketTimeout(limits.imap_connect_seconds, limits.imap_read_seconds)
     try:
         ctx = build_context(ca_file)
@@ -136,10 +109,22 @@ def connect(
     client: Any = None
     failure: ConnectError
     try:
-        client = _Client(host, port, ssl=mode is TlsMode.IMPLICIT, ssl_context=ctx, timeout=timeout)
-        if mode is TlsMode.STARTTLS:
-            return Connection(client, _starttls(client, ctx))
-        return Connection(client, parse_capabilities(client.capabilities()))
+        client = _Client(
+            host,
+            port,
+            ssl=mode is TlsMode.IMPLICIT,
+            ssl_context=ctx,
+            timeout=timeout,
+            limits=limits,
+        )
+        imap = client._imap
+        check_instance(imap, limits)
+        starttls = mode is TlsMode.STARTTLS
+        capabilities = (
+            _starttls(client, ctx) if starttls else parse_capabilities(client.capabilities())
+        )
+        imap.verify_liveness(starttls=starttls)
+        return ReadOnlySession(client, capabilities, limits)
     except Exception as exc:
         failure = _map(exc)
         if client is not None:
@@ -151,10 +136,16 @@ def _map(exc: Exception) -> ConnectError:
     """A fresh error, raised outside the handler so no server text hangs off ``__context__``."""
     if isinstance(exc, ConnectError):
         return ConnectError(exc.code)
-    if isinstance(exc, _PreTlsBytes):
+    if isinstance(exc, PreTlsBytes):
         return ConnectError("pre_tls_bytes")
-    if isinstance(exc, _NoProbe):
+    if isinstance(exc, NoProbe):
         return ConnectError("hook_unavailable")
+    if isinstance(exc, LimitBreach):
+        return ConnectError("limit_exceeded")
+    if isinstance(exc, HookBypassed):
+        return ConnectError("hook_bypassed")
+    if isinstance(exc, ReadOnlyViolation):
+        return ConnectError("read_only_violation")
     if isinstance(exc, ssl.SSLCertVerificationError):
         return ConnectError("tls_verify_failed")
     if isinstance(exc, ssl.SSLError):
