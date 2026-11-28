@@ -52,6 +52,14 @@ class _State:
     dead: bool = False
 
 
+def tagre_of(imap: object) -> re.Pattern[bytes] | None:
+    """imaplib's tagged-response pattern if it still has the ``tag`` and ``type`` groups."""
+    pattern = getattr(imap, "tagre", None)
+    if isinstance(pattern, re.Pattern) and {"tag", "type"} <= set(pattern.groupindex):
+        return pattern
+    return None
+
+
 def apply_line_cap(limits: Limits) -> None:
     """Set ``imaplib._MAXLINE`` from `L-20`; process-global, so ``readline`` checks it too."""
     imaplib._MAXLINE = limits.max_line_bytes  # type: ignore[attr-defined]
@@ -256,8 +264,10 @@ class GuardMixin(imaplib.IMAP4):
 
     def _note_line(self, text: bytes) -> None:
         s = self._mf
-        tagre = getattr(self, "tagre", None)
-        match = tagre.match(text) if tagre is not None else None
+        tagre = tagre_of(self)
+        if tagre is None:
+            self._bypassed("tagre")
+        match = tagre.match(text)
         if match is not None:
             tag = match.group("tag")
             if tag not in s.vetted:
