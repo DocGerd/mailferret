@@ -18,7 +18,7 @@ from imapclient.imap4 import IMAP4WithTimeout  # type: ignore[import-untyped]
 from imapclient.tls import IMAP4_TLS  # type: ignore[import-untyped]
 
 from mailferret.imap.errors import ConnectError
-from mailferret.imap.guard import GuardMixin
+from mailferret.imap.guard import GuardMixin, tagre_of
 from mailferret.imap.logging_pin import logging_is_pinned
 from mailferret.limits import Limits
 
@@ -69,6 +69,8 @@ def check_instance(imap: Any, limits: Limits) -> None:
     if not isinstance(imap, GuardMixin):
         raise ConnectError("hook_unavailable")
     if not isinstance(getattr(imap, "untagged_responses", None), dict):
+        raise ConnectError("hook_unavailable")
+    if tagre_of(imap) is None:
         raise ConnectError("hook_unavailable")
     if not isinstance(type(imap).debug, property) or imap.debug != 0:
         raise ConnectError("hook_unavailable")
