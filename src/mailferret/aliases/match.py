@@ -17,16 +17,27 @@ class Pattern:
     wildcard: bool
 
 
+class PatternTooLongError(ValueError):
+    """An L-23 breach: the server maps it to ``limit_exceeded``."""
+
+    limit_id: Final = "L-23"
+
+
 def compile_pattern(raw: str, limits: Limits = _DEFAULT_LIMITS) -> Pattern:
     """Validate and lower-case a pattern; ``*`` and ``?`` are the only metacharacters.
 
-    Raises ``ValueError`` for an empty, over-long (L-23) or control-bearing pattern.
+    Raises ``PatternTooLongError`` over L-23, checked again after lower-casing, which can
+    lengthen the text. Raises a plain ``ValueError`` for an empty or control-bearing pattern.
     """
-    if not raw or len(raw) > limits.max_query_chars:
-        raise ValueError("alias pattern is empty or too long")
+    if not raw:
+        raise ValueError("alias pattern is empty")
+    if len(raw) > limits.max_query_chars:
+        raise PatternTooLongError("alias pattern is too long")
     if any(ord(c) < 0x20 or 0x7F <= ord(c) < 0xA0 for c in raw):
         raise ValueError("alias pattern contains control characters")
     text = raw.lower()
+    if len(text) > limits.max_query_chars:
+        raise PatternTooLongError("alias pattern is too long")
     return Pattern(text, "*" in text or "?" in text)
 
 

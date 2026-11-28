@@ -77,6 +77,8 @@ class Limits(_Strict):
     keyring_probe_seconds: int | None = None
     credential_stderr_bytes: int | None = None
     credential_status_bytes: int | None = None
+    max_header_values: int | None = None
+    max_header_addresses: int | None = None
 
     @model_validator(mode="after")
     def _only_lower(self) -> Self:

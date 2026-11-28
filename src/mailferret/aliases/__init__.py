@@ -3,12 +3,13 @@
 from mailferret.aliases.aggregate import Aggregation, AliasCount, aggregate_aliases
 from mailferret.aliases.match import (
     Pattern,
+    PatternTooLongError,
     compile_pattern,
     glob_match,
     matches,
     prefilter_fragment,
 )
-from mailferret.aliases.resolver import Alias, resolve_alias
+from mailferret.aliases.resolver import Alias, Resolution, resolve_alias
 from mailferret.aliases.rules import AliasRules, validate_header_names
 
 __all__ = [
@@ -17,6 +18,8 @@ __all__ = [
     "AliasCount",
     "AliasRules",
     "Pattern",
+    "PatternTooLongError",
+    "Resolution",
     "aggregate_aliases",
     "compile_pattern",
     "glob_match",

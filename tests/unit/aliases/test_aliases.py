@@ -7,21 +7,33 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from mailferret.aliases import (
+    Alias,
     AliasRules,
+    PatternTooLongError,
     aggregate_aliases,
     compile_pattern,
     glob_match,
     matches,
     prefilter_fragment,
-    resolve_alias,
     validate_header_names,
 )
+from mailferret.aliases import resolve_alias as _resolve
 from mailferret.config.schema import Aliases
 from mailferret.limits import Limits
 from tests.strategies import addresses, alias_headers, header_values
 
 FUZZ = settings(max_examples=200, deadline=None)
 RULES = AliasRules.create(["example.com"], "+")
+ZWSP = chr(0x200B)
+RLO = chr(0x202E)
+
+
+def resolve_alias(
+    headers: dict[str, list[str]] | dict[str, list[bytes]] | dict[str, list[str | bytes]],
+    rules: AliasRules,
+    limits: Limits | None = None,
+) -> Alias | None:
+    return _resolve(headers, rules, limits or Limits()).alias
 
 
 def test_priority_order_decides() -> None:
@@ -47,6 +59,25 @@ def test_plus_tag_is_split() -> None:
     alias = resolve_alias({"To": ["shop+news@example.com"]}, RULES)
     assert alias is not None
     assert (alias.base, alias.tag, alias.local) == ("shop", "news", "shop+news")
+
+
+def test_empty_plus_tag_does_not_qualify() -> None:
+    rules = AliasRules.create([], "+")
+    assert resolve_alias({"To": ["a+@host.test", "+x@host.test"]}, rules) is None
+
+
+def test_two_domains() -> None:
+    rules = AliasRules.create(["example.com", "Example.NET"])
+    for address in ("a@example.com", "b@example.net"):
+        found = resolve_alias({"To": [address]}, rules)
+        assert found is not None and found.address == address
+    assert resolve_alias({"To": ["a@example.org"]}, rules) is None
+
+
+def test_domains_and_separator_domain_decides() -> None:
+    assert resolve_alias({"To": ["a+x@host.test"]}, RULES) is None
+    found = resolve_alias({"To": ["a@example.com"]}, RULES)
+    assert found is not None and found.tag is None
 
 
 def test_plus_only_requires_a_tag_on_any_domain() -> None:
@@ -75,8 +106,77 @@ def test_bytes_values_and_address_lists() -> None:
 
 
 @pytest.mark.parametrize(
+    "values",
+    [
+        ["shop@example.com", "x@example.o" + chr(34) + "rg"],
+        ["x@example.o" + chr(34) + "rg", "shop@example.com"],
+        ["shop@example.com, "],
+        ["shop@example.com,"],
+        ["shop@example.com, (unbalanced"],
+        ["shop@example.com, x@example.org)"],
+        ["(", "shop@example.com"],
+    ],
+)
+def test_malformed_siblings_do_not_hide_an_address(values: list[str]) -> None:
+    found = resolve_alias({"Delivered-To": values}, RULES)
+    assert found is not None and found.address == "shop@example.com"
+
+
+def test_cut_value_never_completes_another_address() -> None:
+    limits = Limits(max_header_value_chars=64)
+    tail = "<evil+t@example.com"
+    head = '"' + "n" * (64 - len(tail) - 3) + '" '
+    value = head + tail + ".attacker.test>"
+    assert len(head + tail) == 64
+    for rules in (RULES, AliasRules.create([], "+")):
+        result = _resolve({"To": [value]}, rules, limits)
+        assert result.alias is None and result.truncated
+
+
+def test_cut_value_keeps_complete_earlier_addresses() -> None:
+    limits = Limits(max_header_value_chars=64)
+    value = "shop@example.com, " + "n" * 100 + "@example.com"
+    result = _resolve({"To": [value]}, RULES, limits)
+    assert result.alias is not None and result.alias.address == "shop@example.com"
+    assert result.truncated
+
+
+def test_header_bytes_limit_cuts_too() -> None:
+    limits = Limits(max_header_bytes=40)
+    value = b"x@example.org, " + b"a" * 20 + b"@example.com.attacker.test"
+    result = _resolve({"To": [value]}, RULES, limits)
+    assert result.alias is None and result.truncated
+
+
+def test_value_cap_is_signalled() -> None:
+    limits = Limits(max_header_values=2)
+    values = ["a@example.org", "b@example.org", "shop@example.com"]
+    result = _resolve({"To": values}, RULES, limits)
+    assert result.alias is None and result.truncated
+    ok = _resolve({"To": values[:2]}, RULES, limits)
+    assert ok.alias is None and not ok.truncated
+    agg = aggregate_aliases([{"To": values}], RULES, limits)
+    assert agg.truncated
+
+
+def test_address_cap_is_signalled() -> None:
+    limits = Limits(max_header_addresses=2)
+    value = "a@example.org, b@example.org, shop@example.com"
+    result = _resolve({"To": [value]}, RULES, limits)
+    assert result.alias is None and result.truncated
+    ok = _resolve({"To": ["a@example.org, shop@example.com"]}, RULES, limits)
+    assert ok.alias is not None and not ok.truncated
+    assert aggregate_aliases([{"To": [value]}], RULES, limits).truncated
+
+
+@pytest.mark.parametrize(
     "value",
-    ["sh​op@example.com", "shop@exa‮mple.com", '"a b"@example.com', "shop@example.com\x00"],
+    [
+        "sh" + ZWSP + "op@example.com",
+        "shop@exa" + RLO + "mple.com",
+        '"a b"@example.com',
+        "shop@example.com\x00",
+    ],
 )
 def test_disguised_addresses_never_match(value: str) -> None:
     assert resolve_alias({"To": [value]}, RULES) is None
@@ -85,10 +185,20 @@ def test_disguised_addresses_never_match(value: str) -> None:
 LOOKALIKES = [chr(0xFF34) + chr(0xFF4F), "To" + chr(0x200B), "T" + chr(0x43E)]
 
 
-@pytest.mark.parametrize("name", [*LOOKALIKES, "To:", "T o", "", "x\r\nBcc", "To\x00"])
+ATOM_SPECIALS = ["X(", "X)", "X{", "X%", "X*", 'X"', "X\\", "X]", "X)]", "X{5}"]
+
+
+@pytest.mark.parametrize(
+    "name", [*LOOKALIKES, *ATOM_SPECIALS, "To:", "T o", "", "x\r\nBcc", "To\x00", "x" * 65]
+)
 def test_header_names_reject_lookalikes_and_syntax(name: str) -> None:
     with pytest.raises(ValueError, match="header"):
         validate_header_names([name])
+
+
+@pytest.mark.parametrize("name", ["To", "X-Original-To", "List-Id", "X_1.a+b~c'd!e#f$g&h"])
+def test_header_names_accept_ordinary_fields(name: str) -> None:
+    assert validate_header_names([name]) == (name,)
 
 
 def test_header_names_dedupe_and_require_one() -> None:
@@ -123,6 +233,8 @@ def test_rules_from_config_and_validation() -> None:
         ("a*b*c", "aXbYbZc", True),
         ("a*b*c", "aXbYbZ", False),
         ("[a-z]@example.com", "a@example.com", False),
+        ("[a-z]*@example.com", "abc@example.com", False),
+        ("[a-z]*@example.com", "[a-z]x@example.com", True),
     ],
 )
 def test_pattern_matching(pattern: str, address: str, expected: bool) -> None:
@@ -138,18 +250,42 @@ def test_glob_is_linear_enough_for_hostile_patterns() -> None:
 def test_pattern_bounds_and_controls() -> None:
     limits = Limits()
     compile_pattern("a" * limits.max_query_chars)
-    for bad in ("", "a" * (limits.max_query_chars + 1), "a\r\nb", "a\x00"):
-        with pytest.raises(ValueError, match="alias pattern"):
+    with pytest.raises(PatternTooLongError) as caught:
+        compile_pattern("a" * (limits.max_query_chars + 1))
+    assert caught.value.limit_id == "L-23"
+    for bad in ("", "a\r\nb", "a\x00"):
+        with pytest.raises(ValueError, match="alias pattern") as error:
             compile_pattern(bad)
+        assert not isinstance(error.value, PatternTooLongError)
 
 
-@pytest.mark.parametrize("pattern", ['a") OR HEADER x "', "a{5}\r\nb", "*) (DELETED", "a\\"])
-def test_injection_text_is_inert_data(pattern: str) -> None:
-    try:
-        compiled = compile_pattern(pattern)
-    except ValueError:
+def test_lowercasing_cannot_exceed_l23() -> None:
+    dotted = chr(0x130)
+    assert len(dotted.lower()) == 2
+    compile_pattern(dotted * 128)
+    with pytest.raises(PatternTooLongError):
+        compile_pattern(dotted * Limits().max_query_chars)
+
+
+@pytest.mark.parametrize(
+    ("pattern", "rejected"),
+    [
+        ('a") OR HEADER x "', False),
+        ("a{5}\r\nb", True),
+        ("*) (DELETED", False),
+        ("a\\", False),
+        ("a\nb", True),
+    ],
+)
+def test_injection_text_is_inert_data(pattern: str, rejected: bool) -> None:
+    if rejected:
+        with pytest.raises(ValueError, match="alias pattern"):
+            compile_pattern(pattern)
         return
+    compiled = compile_pattern(pattern)
     assert matches(compiled, "shop@example.com") is False
+    fragment = prefilter_fragment(compiled)
+    assert fragment is None or (fragment in compiled.text and not set("*?") & set(fragment))
 
 
 @pytest.mark.parametrize(
@@ -192,7 +328,7 @@ def test_aggregate_stops_at_scan_limit() -> None:
 @FUZZ
 @given(alias_headers(), addresses())
 def test_fuzz_resolved_alias_is_well_formed(headers: dict[str, list[str]], extra: str) -> None:
-    alias = resolve_alias({**headers, "X-Extra": [extra]}, RULES)
+    alias = resolve_alias({**headers, "To": [*headers.get("To", []), extra]}, RULES)
     if alias is not None:
         assert alias.address == alias.address.lower()
         assert alias.address == f"{alias.local}@{alias.domain}"
@@ -225,5 +361,5 @@ def test_fuzz_compile_pattern_total(raw: str) -> None:
         compiled = compile_pattern(raw)
     except ValueError:
         return
-    assert len(compiled.text) <= Limits().max_query_chars + 8 * len(raw)
+    assert len(compiled.text) <= Limits().max_query_chars
     matches(compiled, "shop@example.com")

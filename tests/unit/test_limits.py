@@ -44,6 +44,8 @@ SECURITY_TABLE = {
     "L-27": {"keyring_probe_seconds": 10},
     "L-28": {"credential_stderr_bytes": 16 * 1024},
     "L-29": {"credential_status_bytes": 16 * 1024},
+    "L-30": {"max_header_values": 16},
+    "L-31": {"max_header_addresses": 64},
 }
 EXPECTED = {k: v for row in SECURITY_TABLE.values() for k, v in row.items()}
 

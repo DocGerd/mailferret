@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from typing import Final, Protocol, Self
 
 DEFAULT_HEADER_PRIORITY: Final = ("Delivered-To", "X-Original-To", "To", "Cc")
-_FIELD_NAME: Final = re.compile(r"[!-9;-~]{1,64}")
+# RFC 5322 ftext minus the IMAP atom-specials ( ) { % * " \ ]: names are spliced into FETCH.
+_FIELD_NAME: Final = re.compile(r"[!#$&'+-9;-\[^-z|-~]{1,64}")
 _SEPARATOR: Final = re.compile(r"[!-?A-~]{1,8}")
 
 
