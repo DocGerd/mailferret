@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import socket
 import sys
 import threading
 import traceback
@@ -223,6 +224,29 @@ def test_expire_keeps_the_tls_object_attached_so_no_send_can_fall_back_to_cleart
     assert sock._sslobj is not None
     with pytest.raises(ReadOnlyViolation):
         session._imap.send(b"A1 NOOP\r\n")
+
+
+def test_close_shuts_the_raw_socket_down_before_the_client_does(
+    server: FakeImapServer, opener: Opener, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = opener(server)
+    order: list[str] = []
+    real_raw = socket.socket.shutdown
+    real_client = session._client.shutdown
+
+    def raw(self: socket.socket, how: int) -> None:
+        order.append(f"raw:{self._sslobj is not None}")  # type: ignore[attr-defined]
+        real_raw(self, how)
+
+    def client() -> None:
+        order.append("client")
+        real_client()
+
+    monkeypatch.setattr(socket.socket, "shutdown", raw)
+    monkeypatch.setattr(session._client, "shutdown", client)
+    session.close()
+    assert order[:2] == ["raw:True", "client"]
+    assert not session.usable
 
 
 def test_a_stale_completion_is_not_read_as_the_next_failure(
