@@ -52,6 +52,9 @@ def check_hooks() -> None:
     for name in _IMAPLIB_HOOKS:
         if _shape(imaplib.IMAP4, name) != _shape(GuardMixin, name):
             raise ConnectError("hook_unavailable")
+    # imaplib defines its command log only when running with asserts (not under ``python -O``).
+    if __debug__ and _shape(imaplib.IMAP4, "_log") != _shape(GuardMixin, "_log"):
+        raise ConnectError("hook_unavailable")
     maxline = getattr(imaplib, "_MAXLINE", None)
     if type(maxline) is not int:
         raise ConnectError("hook_unavailable")
@@ -71,6 +74,8 @@ def check_instance(imap: Any, limits: Limits) -> None:
     if not isinstance(imap, GuardMixin):
         raise ConnectError("hook_unavailable")
     if not isinstance(getattr(imap, "untagged_responses", None), dict):
+        raise ConnectError("hook_unavailable")
+    if __debug__ and not isinstance(getattr(imap, "_cmd_log", None), dict):
         raise ConnectError("hook_unavailable")
     if tagre_of(imap) is None:
         raise ConnectError("hook_unavailable")

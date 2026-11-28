@@ -155,6 +155,7 @@ def connect(
             _starttls(client, ctx) if starttls else parse_capabilities(client.capabilities())
         )
         imap.verify_liveness(starttls=starttls)
+        imap.clear_command_log()
         return ReadOnlySession(client, capabilities, limits)
     except Exception as exc:
         failure = _map(exc)
