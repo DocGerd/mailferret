@@ -28,7 +28,6 @@ Phase: 2a done (scaffold F0, spikes V1–V4) and the architecture update that fo
 - Manual checks only a user can run: ARCHITECTURE §10 items 5, 7 (the client- or `wsl.exe`-launched part), 9, 14, 19, 21 and 22.
 - Task-owner notes from the architecture-update review: issue #14 (D2, D5, B4, B5, C4, E3, P3).
 - Task-owner notes from the B1, B3, B7, C0, D0, B2, B6, F1, D4, D1, C1 and B4 reviews: also issue #14.
-- `lazy-importer` is a BORDERLINE runtime dependency (via keyring on Python 3.11); re-check when it has a second release (`docs/research/library-survey.md`).
 - Parked: issue #10, commit-guard hardening. The guard stays best effort; `.githooks` and CI `scan` enforce.
 
 ## Contributor notes
