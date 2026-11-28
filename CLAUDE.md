@@ -34,7 +34,8 @@ A generic, read-only-by-default IMAP MCP server (`mailferret serve`, stdio) and 
 - One PR per PLAN task, small conventional commits, `Closes #n` where an issue exists.
 - Each task works in its own worktree and touches only its module, tests and fixtures.
 - Dependencies: only the vetted table in `docs/research/library-survey.md`, including every transitive package that lands in `uv.lock` (runtime vs dev-only row). Runtime licenses permissive (MIT/BSD/Apache/PSF); dev-only tools may be MPL-2.0/LGPL (Hypothesis) if healthy. A new dependency needs vetting first.
-- Parallel tasks that each add dependencies conflict on `pyproject.toml`/`uv.lock`: merge one, then resolve the other with `uv lock`.
+- Parallel tasks that each add dependencies conflict on `pyproject.toml`/`uv.lock`: merge one, then rebuild the other as a fresh PR (new branch from main, cherry-pick, `uv lock`) and have the same reviewers confirm it with `git range-diff`.
+- A PR whose CI failed because of a bug since fixed on main needs that same fresh branch; re-running CI reuses the old merge ref.
 - Minimal comments and prose: only what the code cannot say; never pin decaying facts.
 - Tests never touch a real mailbox. Integration tests use GreenMail; `/smoke-test` (manual, the user's own account) never runs in CI.
 
@@ -57,6 +58,10 @@ A generic, read-only-by-default IMAP MCP server (`mailferret serve`, stdio) and 
 - Briefs give scope, a path allowlist, a definition of done, and ask for a concise summary.
 - Never run worktree cleanup (`git worktree remove/prune`) while agents are being spawned into worktrees.
 - Pyright "import could not be resolved" diagnostics from agent worktrees are noise (no venv there); trust `uv run mypy`.
+- Isolated agent worktrees are auto-removed when the agent stops with no changes; before resuming such an agent, tell it to check/recreate its worktree, or create a named task worktree up front.
+- Scratch worktrees (reviewers): unique path per agent (`<role>-<pr>-$(mktemp -u XXXX)`), never hide `git worktree add` errors, remove only the path you created, never `git worktree prune`.
+- Parser/filter fixes: fail closed on unrecognised input (allowlist), fix the class not the vector, re-verify only the final head; threads are only regressions or fail-open, new detection classes go to issue #14.
+- Automated security-scan findings that arrive mid-task go to the task's current fixer, in the same round.
 
 ## Review gate (PLAN §4)
 - Every module PR gets a fresh-agent review: `/review-module <task> <PR>` runs `mf-reviewer` and `mf-security-reviewer` in parallel.
@@ -72,6 +77,7 @@ A generic, read-only-by-default IMAP MCP server (`mailferret serve`, stdio) and 
 - One-time setup per clone: `git config core.hooksPath .githooks` (pre-commit PII scan + tests, commit-msg scan). Until it is set, commits made outside Claude Code are guarded only by CI.
 - The Claude hook in `.claude/settings.json` also blocks commits with PII or failing tests. CI runs `pii-check` on every PR.
 - Personal extra patterns go only in the untracked `.git/info/pii-patterns`. Never commit them.
+- To PII-scan a scratchpad file, copy it to `mktemp -d` first; the scratchpad path itself matches the local patterns.
 
 ## CLAUDE.md
 - Changes to this file go through the main session only, never a subagent.
