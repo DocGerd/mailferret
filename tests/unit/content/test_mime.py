@@ -778,3 +778,57 @@ def test_a_plain_outside_the_group_never_beats_an_html_alternative() -> None:
     selection = select_body(tree)
     assert selection.part is not None and selection.part.section == "1.1"
     assert _sections(selection.extra) == ["2"]
+
+
+def _alt(*children: object) -> mime_generators.Node:
+    return multipart(list(children), b"alternative")
+
+
+def test_two_alternative_groups_yield_one_extra_rendition() -> None:
+    structure = multipart([_alt(text_leaf(), html_leaf()), _alt(html_leaf(), text_leaf())])
+    selection = select_body(parse_bodystructure(structure))
+    assert selection.part is not None and selection.part.section == "1.1"
+    assert _sections(selection.extra) == ["2.2"]
+    mail = _mixed_mail(
+        b"Content-Type: multipart/alternative; boundary=a\r\n\r\n"
+        + b"--a\r\n"
+        + _TEXT_PLAIN
+        + b"\r\n--a\r\n"
+        + _TEXT_HTML
+        + b"\r\n--a--",
+        b"Content-Type: multipart/alternative; boundary=a\r\n\r\n"
+        + b"--a\r\n"
+        + _TEXT_HTML
+        + b"\r\n--a\r\n"
+        + _TEXT_PLAIN
+        + b"\r\n--a--",
+    )
+    raw_selection = select_body(walk_message(mail))
+    assert raw_selection.part is not None and raw_selection.part.section == "1.1"
+    assert _sections(raw_selection.extra) == ["2.2"]
+
+
+def test_nested_alternatives_belong_to_the_outermost_group() -> None:
+    structure = _alt(text_leaf(), _alt(html_leaf(), html_leaf()))
+    selection = select_body(parse_bodystructure(structure))
+    assert selection.part is not None and selection.part.section == "1"
+    assert selection.extra == ()
+    inner = (
+        b"Content-Type: multipart/alternative; boundary=i\r\n\r\n"
+        + b"--i\r\n"
+        + _TEXT_HTML
+        + b"\r\n--i\r\n"
+        + _TEXT_HTML
+        + b"\r\n--i--"
+    )
+    mail = (
+        b'Content-Type: multipart/alternative; boundary="a"\r\n\r\n'
+        + b"--a\r\n"
+        + _TEXT_PLAIN
+        + b"\r\n--a\r\n"
+        + inner
+        + b"\r\n--a--\r\n"
+    )
+    raw_selection = select_body(walk_message(mail))
+    assert raw_selection.part is not None and raw_selection.part.section == "1"
+    assert raw_selection.extra == ()

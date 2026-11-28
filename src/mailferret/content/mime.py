@@ -263,7 +263,7 @@ def parse_bodystructure(structure: object, limits: Limits = _DEFAULT_LIMITS) -> 
                 if not kids:
                     notes.add("malformed", part=section or "1")
                     failed = True
-                group = (section or "0") if subtype == "alternative" else alternative
+                group = alternative or ((section or "0") if subtype == "alternative" else None)
                 for index in reversed(range(len(kids))):
                     stack.append((kids[index], depth + 1, _join(section, index + 1), group))
             else:
@@ -438,8 +438,8 @@ def walk_message(raw: bytes, limits: Limits = _DEFAULT_LIMITS) -> MimeTree:
                     child_default = (
                         "message/rfc822" if content_type == "multipart/digest" else "text/plain"
                     )
-                    group = (
-                        (section or "0") if content_type == "multipart/alternative" else alternative
+                    group = alternative or (
+                        (section or "0") if content_type == "multipart/alternative" else None
                     )
                     for index in reversed(range(len(kids))):
                         child = kids[index]
@@ -480,10 +480,10 @@ def walk_message(raw: bytes, limits: Limits = _DEFAULT_LIMITS) -> MimeTree:
 def select_body(tree: MimeTree, limits: Limits = _DEFAULT_LIMITS) -> BodySelection:
     """Pick the body: the first inline text part in document order.
 
-    Only inside a ``multipart/alternative`` does ``text/plain`` win over ``text/html`` (the
-    siblings share ``PartInfo.alternative``). Inline text parts that are neither the body nor
-    one of its alternatives are returned in ``extra``, each with an ``extra_text`` note, so the
-    caller can fetch them instead of losing them.
+    Only inside a ``multipart/alternative`` does ``text/plain`` win over ``text/html``; the
+    renditions share ``PartInfo.alternative``, the outermost alternative above them. Other inline
+    text parts are returned in ``extra`` (one rendition per other alternative group, plain first),
+    each with an ``extra_text`` note, so the caller can fetch them instead of losing them.
 
     ``fetch_bytes`` is the partial-fetch length, always ``max_part_bytes`` (L-02): a declared
     size is a hint and never shortens the fetch. A declared size over the cap adds an L-02 note;
@@ -497,14 +497,23 @@ def select_body(tree: MimeTree, limits: Limits = _DEFAULT_LIMITS) -> BodySelecti
     if group is not None:
         siblings = [p for p in inline if p.alternative == group]
         chosen = next((p for p in siblings if p.content_type == "text/plain"), chosen)
-    extra = tuple(
-        p for p in inline if p is not chosen and (group is None or p.alternative != group)
-    )
+    extra: list[PartInfo] = []
+    seen: dict[str, int] = {}
+    for part in inline:
+        if part is chosen or (group is not None and part.alternative == group):
+            continue
+        if part.alternative is None:
+            extra.append(part)
+        elif part.alternative not in seen:
+            seen[part.alternative] = len(extra)
+            extra.append(part)
+        elif part.content_type == "text/plain":
+            extra[seen[part.alternative]] = part
     notes = [Note("extra_text", None, p.section) for p in extra]
     cap = limits.max_part_bytes
     if chosen.size is not None and chosen.size > cap:
         notes.append(Note("limit_exceeded", "L-02", chosen.section))
-    return BodySelection(chosen, cap, tuple(notes), extra)
+    return BodySelection(chosen, cap, tuple(notes), tuple(extra))
 
 
 def list_attachments(
