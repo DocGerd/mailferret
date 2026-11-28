@@ -100,6 +100,20 @@ def plain_pdf(pages: int = 1, text: str = "Hello PDF") -> bytes:
     return _pdf(objects)
 
 
+def jbig2_content_pdf() -> bytes:
+    """A complete page whose content stream names the ``/JBIG2Decode`` filter."""
+    return _pdf(
+        {
+            1: b"<< /Type /Catalog /Pages 2 0 R >>",
+            2: b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>",
+            3: _stream(b"\x97JB2\r\n\x1a\n" + b"\0" * 64, b"/Filter /JBIG2Decode "),
+            4: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 3 0 R "
+            b"/Resources << /Font << /F1 5 0 R >> >> >>",
+            5: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        }
+    )
+
+
 def large_plain_pdf(size: int) -> bytes:
     return plain_pdf() + b"%" + b"x" * size + b"\n"
 
