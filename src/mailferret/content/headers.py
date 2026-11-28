@@ -66,47 +66,38 @@ def _word_payload(encoding: str, payload: str) -> bytes | None:
     return bytes(out)
 
 
-def _flush(group: list[tuple[str, bytes]], out: list[str], limits: Limits) -> int:
-    written = 0
+def _flush(group: list[tuple[str, bytes]], out: list[str], limits: Limits) -> None:
     index = 0
     while index < len(group):
         charset = group[index][0]
         end = index
         while end < len(group) and group[end][0] == charset:
             end += 1
-        text = decode_text(b"".join(p for _, p in group[index:end]), charset, limits=limits).text
-        out.append(text)
-        written += len(text)
+        joined = b"".join(payload for _, payload in group[index:end])
+        out.append(decode_text(joined, charset, limits=limits).text)
         index = end
     group.clear()
-    return written
 
 
-def _decode_words(text: str, max_chars: int, limits: Limits) -> tuple[str, bool]:
+def _decode_words(text: str, limits: Limits) -> str:
     out: list[str] = []
     group: list[tuple[str, bytes]] = []
-    total = 0
     pos = 0
     for match in _ENCODED_WORD.finditer(text):
         gap = text[pos : match.start()]
         if not (group and not gap.strip(_WHITESPACE)):
-            total += _flush(group, out, limits)
+            _flush(group, out, limits)
             out.append(gap)
-            total += len(gap)
         payload = _word_payload(match.group(2), match.group(3))
         if payload is None:
-            total += _flush(group, out, limits)
+            _flush(group, out, limits)
             out.append(match.group(0))
-            total += len(match.group(0))
         else:
             group.append((match.group(1).lower(), payload))
         pos = match.end()
-        if total > max_chars:
-            _flush(group, out, limits)
-            return "".join(out), True
-    total += _flush(group, out, limits)
+    _flush(group, out, limits)
     out.append(text[pos:])
-    return "".join(out), False
+    return "".join(out)
 
 
 def decode_header_value(raw: bytes | str, limits: Limits = _DEFAULT_LIMITS) -> Truncated:
@@ -116,18 +107,10 @@ def decode_header_value(raw: bytes | str, limits: Limits = _DEFAULT_LIMITS) -> T
     (L-04) last; either cut sets ``truncated``.
     """
     text, cut = _header_text(raw, limits)
-    max_chars = limits.max_header_value_chars
     unfolded = _FOLD.sub("", text)
-    decoded, stopped = (
-        _decode_words(unfolded, max_chars, limits)
-        if "=?" in unfolded
-        else (
-            unfolded,
-            False,
-        )
-    )
-    result = truncate_chars(_clean(decoded), max_chars)
-    return Truncated(result.text, result.truncated or cut or stopped)
+    decoded = _decode_words(unfolded, limits) if "=?" in unfolded else unfolded
+    result = truncate_chars(_clean(decoded), limits.max_header_value_chars)
+    return Truncated(result.text, result.truncated or cut)
 
 
 @dataclass(frozen=True, slots=True)
