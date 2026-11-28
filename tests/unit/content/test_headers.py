@@ -4,6 +4,7 @@ import ast
 import logging
 import time
 import tracemalloc
+import unicodedata
 from email import message_from_bytes
 from pathlib import Path
 from typing import NamedTuple
@@ -480,3 +481,95 @@ def test_l05_bounds_the_work_for_many_large_continuations() -> None:
         tracemalloc.stop()
     assert result.truncated
     assert peak < 16 * limits.max_header_bytes
+
+
+CF_CHARS = [chr(c) for c in range(0x110000) if unicodedata.category(chr(c)) == "Cf"]
+NAMED_CF = [
+    *map(chr, range(0x202A, 0x202F)),
+    *map(chr, range(0x2066, 0x206A)),
+    *map(chr, range(0x200B, 0x2010)),
+    "\u2060",
+    "\ufeff",
+    "\u061c",
+    "\u180e",
+]
+ADDRESS_FORBIDDEN = set('<>",;() \t\r\n')
+
+
+def test_named_format_controls_are_cf() -> None:
+    assert set(NAMED_CF) <= set(CF_CHARS)
+
+
+def test_every_cf_character_is_removed_from_header_values_and_parameters() -> None:
+    value = "a" + "".join(CF_CHARS) + "b"
+    assert decode_header_value(value).text == "ab"
+    assert decode_header_value(value.encode()).text == "ab"
+    assert decode_parameters([("filename", value)]).values == {"filename": "ab"}
+    assert parse_header_parameters(f"attachment{value}; x=1").value == "attachmentab"
+
+
+def test_cf_hidden_in_encoded_words_and_2231_values_is_removed() -> None:
+    assert decode_header_value("=?utf-8?B?4oCu?=evil").text == "evil"
+    assert decode_parameters([("filename*", "utf-8''a%E2%80%AEb")]).values == {"filename": "ab"}
+
+
+def test_bidi_override_in_display_name_cannot_reorder_the_display() -> None:
+    result = format_address(_address(name="\u202eerom\u2066x".encode()))
+    assert result is not None
+    assert result.name == "eromx"
+    assert not set(NAMED_CF) & set(result.display)
+
+
+def test_cf_cannot_hide_inside_address_parts() -> None:
+    result = format_address(_address(mailbox=b"us\xe2\x80\x8ber", host=b"exam\xe2\x80\xaeple.com"))
+    assert result is not None
+    assert result.address == "user@example.com"
+
+
+@pytest.mark.parametrize(
+    ("mailbox", "host"),
+    [
+        (b"ceo@example.com", b"evil.test"),
+        (b"ceo", b"example.com@evil.test"),
+        (b"a,b@example.com", b"evil.test"),
+        (b"a;b", b"evil.test"),
+        (b"a(b)", b"evil.test"),
+        (b"ceo@example.com", b"evil.test,"),
+    ],
+)
+def test_address_parts_cannot_forge_another_address(mailbox: bytes, host: bytes) -> None:
+    result = format_address(_address(mailbox=mailbox, host=host))
+    assert result is not None
+    assert result.address.count("@") == 1
+    assert not ADDRESS_FORBIDDEN & set(result.address)
+    assert result.display.count("@") == 1
+
+
+def _bytes_or_marked_text(alphabet: list[str]) -> st.SearchStrategy[bytes]:
+    return st.binary(max_size=40) | st.text(alphabet=st.sampled_from(alphabet), max_size=40).map(
+        str.encode
+    )
+
+
+@FUZZ
+@given(
+    _bytes_or_marked_text([*NAMED_CF, "@", ",", "a", " "]),
+    _bytes_or_marked_text([*NAMED_CF, "@", ";", "b", "<"]),
+    _bytes_or_marked_text([*NAMED_CF, '"', "<", "c"]),
+)
+def test_formatted_addresses_are_single_unforgeable_and_free_of_format_controls(
+    mailbox: bytes, host: bytes, name: bytes
+) -> None:
+    result = format_address(_address(mailbox=mailbox, host=host, name=name))
+    if result is None:
+        return
+    assert result.address.count("@") == 1
+    assert not ADDRESS_FORBIDDEN & set(result.address)
+    assert not set(CF_CHARS) & set(result.display)
+    assert _has_no_controls(result.display)
+
+
+@FUZZ
+@given(st.text(alphabet=st.sampled_from([*NAMED_CF, "a", "=", "?", "\n", " "]), max_size=60))
+def test_header_values_never_contain_format_controls(text: str) -> None:
+    assert not set(CF_CHARS) & set(decode_header_value(text).text)
