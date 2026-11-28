@@ -149,12 +149,19 @@ class AccountSession:
         except ConnectionDropped:
             failure = ServerError(session_usable=False)
         except BaseException:
-            self._release(session)
+            self._discard(session)
             raise
         if failure is not None:
-            self._release(session)
+            self._discard(session)
             raise failure
         return session
+
+    def _discard(self, session: ReadOnlySession) -> None:
+        """A session whose login failed is never reused, even when its socket still works."""
+        with self._state:
+            if self._session is session:
+                self._session = None
+        session.close()
 
     def _release(self, session: ReadOnlySession) -> None:
         """Drop ``session`` from the cache unless it survived its failure."""
