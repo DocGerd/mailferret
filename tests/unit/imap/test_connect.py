@@ -233,9 +233,8 @@ def test_hostile_8bit_capability_text_does_not_escape(
     tls_material: TlsMaterial, mode: TlsMode
 ) -> None:
     hostile = b"* CAPABILITY IMAP4rev1 SECRETMARK \xff\r\n"
-    with FakeImapServer(
-        tls=tls_material, implicit_tls=mode is TlsMode.IMPLICIT, greeting=hostile
-    ) as server:
+    with FakeImapServer(tls=tls_material, implicit_tls=mode is TlsMode.IMPLICIT) as server:
+        server.on("CAPABILITY", [hostile, "{tag} OK done\r\n"])
         try:
             connect(HOST, server.port, mode, ca_file=tls_material.cert_file)
         except ConnectError as exc:
