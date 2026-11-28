@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import ssl
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from mailferret.imap import build_context, parse_capabilities
-from tests.support.imap_fake import TlsMaterial
+from mailferret.imap import TlsMode, build_context, connect, parse_capabilities
+from tests.conftest import tls_material_or_skip
+from tests.support.imap_fake import FakeImapServer, TlsMaterial
+from tests.support.imap_fake.tls import _find_openssl
 
 
 def test_context_defaults() -> None:
@@ -44,3 +47,50 @@ def test_capability_flags_all_set_and_str_tokens() -> None:
 
 def test_capabilities_tolerate_non_ascii() -> None:
     assert parse_capabilities([b"X-\xff"]).raw == frozenset({"X-�"})
+
+
+def _other_ca(directory: Path) -> TlsMaterial:
+    """A second self-signed CA with its own subject, so lookup by subject is unambiguous."""
+    cert, key = directory / "other-cert.pem", directory / "other-key.pem"
+    subprocess.run(  # noqa: S603
+        [
+            _find_openssl(),
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            str(key),
+            "-out",
+            str(cert),
+            "-days",
+            "2",
+            "-subj",
+            "/CN=mailferret other test CA",
+            "-addext",
+            "subjectAltName=IP:127.0.0.1",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE",
+            "-addext",
+            "keyUsage=critical,digitalSignature,keyCertSign",
+        ],
+        check=True,
+        capture_output=True,
+        timeout=60,
+    )
+    return TlsMaterial(cert, key)
+
+
+def test_ca_file_extends_system_store_instead_of_replacing_it(
+    tls_material: TlsMaterial, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tls_material_or_skip(tmp_path)  # skips when the openssl CLI is missing
+    system = _other_ca(tmp_path)
+    monkeypatch.setenv("SSL_CERT_FILE", str(system.cert_file))
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+    for server_material in (tls_material, system):
+        with FakeImapServer(tls=server_material, implicit_tls=True) as server:
+            connect(
+                "127.0.0.1", server.port, TlsMode.IMPLICIT, ca_file=tls_material.cert_file
+            ).close()

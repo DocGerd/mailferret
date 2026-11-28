@@ -134,20 +134,27 @@ def connect(
     except (OSError, ssl.SSLError):
         raise ConnectError("ca_file_unreadable") from None
     client: Any = None
+    failure: ConnectError
     try:
         client = _Client(host, port, ssl=mode is TlsMode.IMPLICIT, ssl_context=ctx, timeout=timeout)
         if mode is TlsMode.STARTTLS:
             return Connection(client, _starttls(client, ctx))
         return Connection(client, parse_capabilities(client.capabilities()))
     except Exception as exc:
+        failure = _map(exc)
         if client is not None:
             _shutdown(client)
-        raise _map(exc) from None
+    raise failure
 
 
-def _map(exc: Exception) -> Exception:
+def _map(exc: Exception) -> ConnectError:
+    """A fresh error, raised outside the handler so no server text hangs off ``__context__``."""
     if isinstance(exc, ConnectError):
-        return exc
+        return ConnectError(exc.code)
+    if isinstance(exc, _PreTlsBytes):
+        return ConnectError("pre_tls_bytes")
+    if isinstance(exc, _NoProbe):
+        return ConnectError("hook_unavailable")
     if isinstance(exc, ssl.SSLCertVerificationError):
         return ConnectError("tls_verify_failed")
     if isinstance(exc, ssl.SSLError):
@@ -156,6 +163,4 @@ def _map(exc: Exception) -> Exception:
         return ConnectError("timeout")
     if isinstance(exc, OSError):
         return ConnectError("connect_failed")
-    if isinstance(exc, imaplib.IMAP4.error | IMAPClientError):
-        return ConnectError("protocol_error")
-    return exc
+    return ConnectError("protocol_error")
