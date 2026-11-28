@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import re
 import socket
 import time
 import unicodedata
@@ -54,7 +55,8 @@ def _is_format(char: str) -> bool:
 
 
 def _vector(name: str) -> str:
-    return HIDDEN_VECTORS[name].replace("{c}", CANARY).replace("{{", "{").replace("}}", "}")
+    template = {**HIDDEN_VECTORS, **INHERITED_HIDDEN_VECTORS}[name]
+    return template.replace("{c}", CANARY).replace("{{", "{").replace("}}", "}")
 
 
 # --- hidden content (T-04) -------------------------------------------------------------------
@@ -190,10 +192,75 @@ HIDDEN_VECTORS = {
     "color_on_parent_bg": (
         '<div style="background:#123456"><span style="color:#123456">{c}</span></div>'
     ),
+    "transparent_bg_no_coloured_ancestor": (
+        '<span style="background:transparent;color:#fff">{c}</span>'
+    ),
+    "uniform_gradient": '<span style="background:linear-gradient(#fff,#fff);color:#fff">{c}</span>',
+    "uniform_gradient_stops_and_positions": (
+        '<span style="background:linear-gradient(to right,white 0%,#ffffff 50%,rgb(255,255,255));'
+        'color:#fff">{c}</span>'
+    ),
+    "uniform_gradient_image": (
+        '<span style="background-image:radial-gradient(circle at 50% 50%,#fff,#fff);'
+        'color:#fff">{c}</span>'
+    ),
+    "uniform_gradient_on_parent": (
+        '<div style="background-image:linear-gradient(white,white)">'
+        '<span style="color:white">{c}</span></div>'
+    ),
+    "fallback_with_background_attribute": (
+        '<table><tr><td bgcolor="#fff" background="https://example.com/b.png">'
+        '<font color="#fff">{c}</font></td></tr></table>'
+    ),
+}
+
+# A relative, inherited or unrecognised child value must never clear a hiding parent (T-04).
+INHERITED_HIDDEN_VECTORS = {
+    "size_em": '<span style="font-size:0"><span style="font-size:1em">{c}</span></span>',
+    "size_percent": '<span style="font-size:0"><span style="font-size:100%">{c}</span></span>',
+    "size_10em": '<span style="font-size:0"><span style="font-size:10em">{c}</span></span>',
+    "size_shorthand_em": '<span style="font-size:0"><span style="font:1em a">{c}</span></span>',
+    "size_shorthand_2em": '<span style="font-size:0px"><b style="font:2em Arial">{c}</b></span>',
+    "size_rem": '<span style="font-size:0"><span style="font-size:1rem">{c}</span></span>',
+    "size_ex": '<span style="font-size:0"><span style="font-size:1ex">{c}</span></span>',
+    "size_ch": '<span style="font-size:0"><span style="font-size:1ch">{c}</span></span>',
+    "size_vw": '<span style="font-size:0"><span style="font-size:5vw">{c}</span></span>',
+    "size_larger": '<span style="font-size:0"><span style="font-size:larger">{c}</span></span>',
+    "size_inherit": '<span style="font-size:0"><span style="font-size:inherit">{c}</span></span>',
+    "size_unset": '<span style="font-size:0"><span style="font-size:unset">{c}</span></span>',
+    "size_calc": '<span style="font-size:0"><b style="font-size:calc(1px+1em)">{c}</b></span>',
+    "size_var": '<span style="font-size:0"><span style="font-size:var(--s)">{c}</span></span>',
+    "size_unitless": '<span style="font-size:0"><span style="font-size:12">{c}</span></span>',
+    "size_garbage": '<span style="font-size:0"><span style="font-size:bogus">{c}</span></span>',
+    "size_sheet_em": ('<style>b{{font-size:1em}}</style><div style="font-size:0"><b>{c}</b></div>'),
+    "size_sheet_absolute_then_inline_em": (
+        "<style>.a{{font-size:12px}}</style>"
+        '<div style="font-size:0"><b class=a style="font-size:1em">{c}</b></div>'
+    ),
+    "size_same_element_absolute_then_em": (
+        '<div style="font-size:0"><b style="font-size:12px;font-size:1em">{c}</b></div>'
+    ),
+    "size_same_element_zero_then_garbage": '<b style="font-size:0;font-size:bogus">{c}</b>',
+    "size_important_garbage": ('<b style="font-size:0;font-size:bogus !important">{c}</b>'),
+    "visibility_inherit": (
+        '<div style="visibility:hidden"><b style="visibility:inherit">{c}</b></div>'
+    ),
+    "visibility_unset": '<div style="visibility:hidden"><b style="visibility:unset">{c}</b></div>',
+    "visibility_revert": (
+        '<div style="visibility:hidden"><b style="visibility:revert">{c}</b></div>'
+    ),
+    "visibility_invalid": (
+        '<div style="visibility:hidden"><b style="visibility:bogus">{c}</b></div>'
+    ),
+    "visibility_sheet_visible_then_inline_inherit": (
+        "<style>.v{{visibility:visible}}</style>"
+        '<div style="visibility:hidden"><b class=v style="visibility:inherit">{c}</b></div>'
+    ),
+    "visibility_hidden_then_garbage": '<b style="visibility:hidden;visibility:bogus">{c}</b>',
 }
 
 
-@pytest.mark.parametrize("name", sorted(HIDDEN_VECTORS))
+@pytest.mark.parametrize("name", sorted({**HIDDEN_VECTORS, **INHERITED_HIDDEN_VECTORS}))
 def test_hidden_vector_is_removed(name: str) -> None:
     result = html_to_text(f"<html><body><p>before</p>{_vector(name)}<p>after</p></body></html>")
     assert CANARY not in result.text
@@ -215,6 +282,20 @@ def test_hidden_vector_is_removed(name: str) -> None:
         '<div style="font-size:0"><div style="font-size:13px">{c}</div></div>',
         '<div style="font:0/0 a"><div style="font-size:14px">{c}</div></div>',
         '<div style="visibility:hidden"><span style="visibility:visible">{c}</span></div>',
+        '<div style="visibility:hidden"><span style="visibility:initial">{c}</span></div>',
+        '<div style="font-size:0"><span style="font-size:large">{c}</span></div>',
+        '<div style="font-size:0"><span style="font-size:12pt">{c}</span></div>',
+        '<div style="font-size:0"><span style="font-size:0.2in">{c}</span></div>',
+        '<div style="font-size:0"><span style="font-size:initial">{c}</span></div>',
+        '<div style="font-size:0"><span style="font:italic bold 14px/1.5 a">{c}</span></div>',
+        '<div style="font-size:0"><span style="font:large a">{c}</span></div>',
+        '<td style="font-size:0"><span style="font-size:12px;font-size:13px">{c}</span></td>',
+        '<style>.a{{font-size:12px}}</style><div style="font-size:0"><b class=a>{c}</b></div>',
+        '<td background="https://example.com/b.png" style="color:#fff">{c}</td>',
+        '<span style="background:linear-gradient(#fff,#000);color:#fff">{c}</span>',
+        '<span style="background:linear-gradient(#fff,#fff),url(x.png);color:#fff">{c}</span>',
+        '<span style="background:linear-gradient(#fff,blue);color:#fff">{c}</span>',
+        '<span style="background:linear-gradient(#fff,transparent);color:#fff">{c}</span>',
         '<div style="color:#fff"><span style="color:#000">{c}</span></div>',
         '<div style="background:#000">'
         '<span style="background:transparent;color:#fff">{c}</span></div>',
@@ -609,7 +690,7 @@ def test_fuzz_arbitrary_bytes_never_raise(data: bytes, charset: str | None) -> N
 
 @FUZZ
 @given(
-    st.sampled_from(sorted(HIDDEN_VECTORS)),
+    st.sampled_from(sorted({**HIDDEN_VECTORS, **INHERITED_HIDDEN_VECTORS})),
     st.lists(st.sampled_from(["<p>x</p>", "text ", "<br>", "<div>", "</div>", "<b>"]), max_size=8),
     st.lists(st.sampled_from(["<p>y</p>", " more", "<br>", "</b>", "<td>"]), max_size=8),
 )
@@ -618,6 +699,84 @@ def test_fuzz_hidden_canary_never_survives(
 ) -> None:
     document = "<html><body>" + "".join(before) + _vector(vector) + "".join(after)
     assert CANARY not in html_to_text(document).text
+
+
+# An oracle written apart from css.py: under a hiding parent only these child values show text.
+_ORACLE_PX = {"px": 1.0, "pt": 4 / 3, "pc": 16.0, "cm": 96 / 2.54, "mm": 96 / 25.4, "in": 96.0}
+_ORACLE_PX["q"] = 96 / 101.6
+_ORACLE_KEYWORDS = {
+    *("xx-small", "x-small", "small", "medium", "large", "x-large", "xx-large", "xxx-large"),
+    "initial",
+}
+_NUMBER_TEXT = re.compile(r"(\d*\.?\d+)([a-z%]*)")
+
+
+def _oracle_size_clears(value: str) -> bool:
+    if value in _ORACLE_KEYWORDS:
+        return True
+    match = _NUMBER_TEXT.fullmatch(value)
+    if match is None or match.group(2) not in _ORACLE_PX:
+        return False
+    return float(match.group(1)) * _ORACLE_PX[match.group(2)] > 4 / 3
+
+
+_numbers = st.sampled_from(["0", "0.5", "1", "1.5", "2", "12", "13.5", "100", "0.0001", "-1"])
+_units = st.sampled_from(
+    ["", "px", "pt", "pc", "cm", "mm", "in", "q", "em", "%", "ex", "ch", "rem", "vw", "vh", "fr"]
+)
+_size_values = st.one_of(
+    st.builds(lambda n, u: n + u, _numbers, _units),
+    st.sampled_from(sorted(_ORACLE_KEYWORDS | {"larger", "smaller", "inherit", "unset", "revert"})),
+    st.sampled_from(["calc(1px+1em)", "var(--s)", "env(x)", "min(1px,1em)", "clamp(1px,1em,2px)"]),
+    st.from_regex(r"[a-z0-9%.()-]{1,12}", fullmatch=True),
+)
+_visibility_values = st.one_of(
+    st.sampled_from(["visible", "hidden", "collapse", "initial", "inherit", "unset", "revert"]),
+    st.from_regex(r"[a-z-]{1,10}", fullmatch=True),
+)
+
+
+def _child(css: str, where: str) -> str:
+    if where == "inline":
+        return f'<b style="{css}">{CANARY}</b>'
+    return f"<style>b{{{css}}}</style><b>{CANARY}</b>"
+
+
+@FUZZ
+@given(_size_values, st.sampled_from(["inline", "sheet"]), st.sampled_from(["font-size", "font"]))
+def test_fuzz_tiny_parent_only_an_allowlisted_size_clears(
+    value: str, where: str, prop: str
+) -> None:
+    css = f"font-size:{value}" if prop == "font-size" else f"font:{value} a"
+    result = html_to_text(f'<div style="font-size:0">{_child(css, where)}</div>')
+    if _oracle_size_clears(value):
+        assert result.text == CANARY
+    else:
+        assert result.text == ""
+        assert NOTE_HIDDEN in result.notes
+
+
+@FUZZ
+@given(_visibility_values, st.sampled_from(["inline", "sheet"]))
+def test_fuzz_hidden_parent_only_visible_or_initial_clears(value: str, where: str) -> None:
+    result = html_to_text(
+        f'<div style="visibility:hidden">{_child(f"visibility:{value}", where)}</div>'
+    )
+    if value in ("visible", "initial"):
+        assert result.text == CANARY
+    else:
+        assert result.text == ""
+        assert NOTE_HIDDEN in result.notes
+
+
+@FUZZ
+@given(_size_values, st.booleans())
+def test_fuzz_same_element_only_an_allowlisted_size_overrides_an_earlier_zero(
+    value: str, tiny_parent: bool
+) -> None:
+    child = f'<b style="font-size:0;font-size:{value}">{CANARY}</b>'
+    html = f'<div style="font-size:0">{child}</div>' if tiny_parent else child
+    assert (html_to_text(html).text == CANARY) == _oracle_size_clears(value)
 
 
 @FUZZ
@@ -755,6 +914,7 @@ def test_nesting_limit_is_reported() -> None:
     result = html_to_text("<font>" * 300 + "tail text")
     assert result.truncated
     assert NOTE_NESTING in result.notes
+    assert NOTE_LIMIT_BODY not in result.notes
     assert html_to_text("<font>" * 100 + "tail text").notes == ()
 
 

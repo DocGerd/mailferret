@@ -5,7 +5,10 @@ import time
 import pytest
 
 from mailferret.content.css import (
+    ColorValue,
+    Flag,
     evaluate,
+    override,
     parse_declarations,
     parse_stylesheet,
     preprocess,
@@ -100,3 +103,88 @@ def test_preprocessing_and_name_scan_are_linear() -> None:
         parse_declarations(css)
         parse_stylesheet(f"x{{{css}}}")
     assert time.monotonic() - started < 3.0
+
+
+def _tiny(css: str) -> Flag | None:
+    return evaluate(parse_declarations(css)[0]).tiny
+
+
+@pytest.mark.parametrize(
+    ("css", "expected"),
+    [
+        ("font-size:0", Flag.ON),
+        ("font-size:1px", Flag.ON),
+        ("font-size:1pt", Flag.ON),
+        ("font-size:0.3mm", Flag.ON),
+        ("font-size:0em", Flag.ON),
+        ("font-size:12px", Flag.OFF),
+        ("font-size:1in", Flag.OFF),
+        ("font-size:xx-large", Flag.OFF),
+        ("font-size:initial", Flag.OFF),
+        ("font:italic bold 12px/1.5 a", Flag.OFF),
+        ("font:small a", Flag.OFF),
+        ("font:0/0 a", Flag.ON),
+        ("font-size:1em", Flag.INHERIT),
+        ("font-size:100%", Flag.INHERIT),
+        ("font-size:12", Flag.INHERIT),
+        ("font-size:larger", Flag.INHERIT),
+        ("font-size:calc(1px+1em)", Flag.INHERIT),
+        ("font-size:var(--s)", Flag.INHERIT),
+        ("font:1em a", Flag.INHERIT),
+        ("font:inherit", Flag.INHERIT),
+        ("font-size:", None),
+        ("color:red", None),
+    ],
+)
+def test_font_size_allowlist(css: str, expected: Flag | None) -> None:
+    assert _tiny(css) is expected
+
+
+def test_an_unrecognised_value_never_clears_a_hiding_one() -> None:
+    assert override(Flag.ON, Flag.INHERIT) is Flag.ON
+    assert override(Flag.ON, Flag.OFF) is Flag.OFF
+    assert override(Flag.OFF, Flag.INHERIT) is Flag.INHERIT
+    assert override(Flag.ON, None) is Flag.ON
+    assert _tiny("font-size:0;font-size:bogus") is Flag.ON
+    assert _tiny("font-size:12px;font-size:1em") is Flag.INHERIT
+    assert _tiny("font-size:0 !important;font-size:12px") is Flag.ON
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("hidden", Flag.ON),
+        ("collapse", Flag.ON),
+        ("visible", Flag.OFF),
+        ("initial", Flag.OFF),
+        ("inherit", Flag.INHERIT),
+        ("unset", Flag.INHERIT),
+        ("revert", Flag.INHERIT),
+        ("bogus", Flag.INHERIT),
+    ],
+)
+def test_visibility_allowlist(value: str, expected: Flag) -> None:
+    assert evaluate(parse_declarations(f"visibility:{value}")[0]).invisible is expected
+
+
+@pytest.mark.parametrize(
+    ("css", "expected"),
+    [
+        ("background:linear-gradient(#fff,#fff)", (255, 255, 255)),
+        (
+            "background-image:linear-gradient(white 0%,#ffffff 50%,rgb(255,255,255))",
+            (255, 255, 255),
+        ),
+        ("background:radial-gradient(circle at 50% 50%,#000,#000)", (0, 0, 0)),
+        ("background:linear-gradient(#fff,#000)", "image"),
+        ("background:linear-gradient(#fff,transparent)", "image"),
+        ("background:linear-gradient(#fff,blue)", "image"),
+        ("background:linear-gradient(#fff,#fff),url(x.png)", "image"),
+        ("background:url(x.png)", "image"),
+        ("background:url(x.png) #123456", (0x12, 0x34, 0x56)),
+        ("background:linear-gradient(#000,#111) #fff", (255, 255, 255)),
+        ("background:transparent", None),
+    ],
+)
+def test_backdrop_of_gradients_and_fallbacks(css: str, expected: ColorValue) -> None:
+    assert evaluate(parse_declarations(css)[0]).background == expected

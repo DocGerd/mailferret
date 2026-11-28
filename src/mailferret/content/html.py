@@ -22,6 +22,7 @@ from lxml import etree
 from mailferret.content.charset import decode_text
 from mailferret.content.css import (
     ColorValue,
+    Flag,
     Props,
     Sheet,
     Style,
@@ -233,7 +234,7 @@ def _camouflaged(color: ColorValue, background: ColorValue) -> bool:
     """Text colour equal to the background; white on an unset background counts as white."""
     if color == "transparent":
         return True
-    if not isinstance(color, tuple) or background == "image":
+    if not isinstance(color, tuple):
         return False
     return color == (255, 255, 255) if background is None else color == background
 
@@ -289,7 +290,14 @@ def _attribute_style(el: Any) -> Style:
     color = None
     if el.tag == "font" and "color" in attrs:
         color = first_color(normalize(attrs.get("color", "")))
-    return Style(normal=Props(color=color, background=background))
+    return Style(normal=Props(color=color, background=background, image="background" in attrs))
+
+
+def _resolve(declared: Flag | None, inherited: bool) -> bool:
+    """Only a recognised clearing value (``OFF``) drops an inherited hiding state."""
+    if declared is None or declared is Flag.INHERIT:
+        return inherited
+    return declared is Flag.ON
 
 
 def _classify(el: Any, walk: _Walk, inherited: _State) -> tuple[bool, bool, _State]:
@@ -319,8 +327,8 @@ def _classify(el: Any, walk: _Walk, inherited: _State) -> tuple[bool, bool, _Sta
     hidden = hidden or style.hidden
     background = inherited.background if style.background is None else style.background
     color = inherited.color if style.color is None else style.color
-    tiny = inherited.tiny if style.tiny is None else style.tiny
-    invisible = inherited.invisible if style.invisible is None else style.invisible
+    tiny = _resolve(style.tiny, inherited.tiny)
+    invisible = _resolve(style.invisible, inherited.invisible)
     return False, hidden, _State(background, color, tiny, invisible)
 
 
@@ -486,10 +494,10 @@ def html_to_text(
     if flags.nesting:
         notes.append(NOTE_NESTING)
     result = truncate_chars(_tidy(text), limits.max_body_chars)
-    over = result.truncated or full or flags.nesting
+    over = result.truncated or full
     if over:
         notes.append(NOTE_LIMIT_BODY)
-    return HtmlText(result.text, over or cut, tuple(notes))
+    return HtmlText(result.text, over or flags.nesting or cut, tuple(notes))
 
 
 def _extract(source: str, budget: int) -> tuple[str, _Flags, bool]:

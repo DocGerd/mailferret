@@ -11,11 +11,17 @@ origin, otherwise the later wins; ``display`` and the other subtree-hiding prope
 so a conflict hides. An unquoted ``url(`` is one token (CSS Syntax 4.3.6); a quote inside it, or an
 unclosed comment, or an escape inside a function name, makes the caller treat the element as
 hidden. Input is preprocessed first (CR, CRLF and FF become LF). A background image with a known
-fallback colour is compared by that colour; with none the backdrop is unknown and text is kept.
+fallback colour is compared by that colour; a gradient counts as a colour only when all its stops
+agree; otherwise the backdrop is unknown and text is kept.
+
+Hiding states inherit through a ``Flag`` allowlist: only a recognised value (an absolute size above
+one point, a size keyword, ``visible``, ``initial``) clears an inherited state. Relative sizes,
+``inherit``, functions and garbage never do.
 """
 
 from __future__ import annotations
 
+import enum
 import re
 from dataclasses import dataclass
 from typing import Final
@@ -51,6 +57,18 @@ _NAMED_COLORS: Final = {
     "gray": (128, 128, 128),
 }
 _FAR: Final = 1000.0
+# Absolute lengths in px. Every other unit (em, %, ex, ch, rem, vw, ...) is relative to something
+# that may itself be zero, so it can never clear an inherited tiny size.
+_ABSOLUTE_UNITS: Final = {
+    "px": 1.0,
+    "pt": 4 / 3,
+    "pc": 16.0,
+    "cm": 96 / 2.54,
+    "mm": 96 / 25.4,
+    "in": 96.0,
+    "q": 96 / 101.6,
+}
+_TINY_PX: Final = 4 / 3  # one point
 _OFFSET_PROPERTIES: Final = frozenset(
     {"left", "right", "top", "bottom", "text-indent", "margin-left"}
 )
@@ -60,20 +78,41 @@ _CLIPPING: Final = frozenset({"hidden", "clip"})
 Declarations = list[tuple[str, str, bool]]  # name, value, !important
 
 
+class Flag(enum.Enum):
+    """A hiding state a declaration sets, clears or leaves to the parent; ``None``: no declaration.
+
+    Only a positively recognised value is ``OFF``. Anything else that is not a hiding value
+    (relative sizes, ``inherit``, functions, garbage) is ``INHERIT``, so it never clears a state.
+    """
+
+    ON = "on"
+    OFF = "off"
+    INHERIT = "inherit"
+
+
+def override(base: Flag | None, top: Flag | None) -> Flag | None:
+    """The state once ``top`` is applied over ``base``; an unrecognised value cannot clear ON."""
+    if top is None:
+        return base
+    if top is Flag.INHERIT and base is Flag.ON:
+        return Flag.ON
+    return top
+
+
 @dataclass(frozen=True, slots=True)
 class Props:
     """Inherited properties of one importance level; ``None`` means not declared."""
 
-    tiny: bool | None = None  # the text is too small to read
-    invisible: bool | None = None  # visibility is hidden or collapse
+    tiny: Flag | None = None  # the text is too small to read
+    invisible: Flag | None = None  # visibility is hidden or collapse
     color: ColorValue = None  # text colour
     background: ColorValue = None  # the known (fallback) colour, never "transparent"
     image: bool = False  # a background image or gradient
 
     def merge(self, later: Props) -> Props:
         return Props(
-            self.tiny if later.tiny is None else later.tiny,
-            self.invisible if later.invisible is None else later.invisible,
+            override(self.tiny, later.tiny),
+            override(self.invisible, later.invisible),
             self.color if later.color is None else later.color,
             self.background if later.background is None else later.background,
             self.image or later.image,
@@ -100,13 +139,12 @@ class Style:
         )
 
     @property
-    def tiny(self) -> bool | None:
-        return self.normal.tiny if self.important.tiny is None else self.important.tiny
+    def tiny(self) -> Flag | None:
+        return override(self.normal.tiny, self.important.tiny)
 
     @property
-    def invisible(self) -> bool | None:
-        value = self.important.invisible
-        return self.normal.invisible if value is None else value
+    def invisible(self) -> Flag | None:
+        return override(self.normal.invisible, self.important.invisible)
 
     @property
     def color(self) -> ColorValue:
@@ -235,8 +273,8 @@ def _number(value: str) -> tuple[float, str] | None:
         return None
 
 
-def _tiny(number: tuple[float, str]) -> bool:
-    return number[0] <= 0 or (number[0] <= 1 and number[1] in ("px", "pt"))
+def _tiny(number: float, unit: str) -> bool:
+    return number * _ABSOLUTE_UNITS[unit] <= _TINY_PX
 
 
 def _channel(token: str) -> int | None:
@@ -299,26 +337,54 @@ def first_color(value: str) -> ColorValue:
     return None
 
 
-def _font_size(value: str) -> bool | None:
-    """Whether a ``font-size`` value is too small to read; ``None`` when it is not a size."""
-    number = _number(value)
-    if number is not None:
-        return _tiny(number)
-    return False if value in _SIZE_KEYWORDS else None
-
-
 _SIZE_KEYWORDS: Final = frozenset(
-    {"xx-small", "x-small", "small", "medium", "large", "x-large", "xx-large", "initial"}
+    {
+        "xx-small",
+        "x-small",
+        "small",
+        "medium",
+        "large",
+        "x-large",
+        "xx-large",
+        "xxx-large",
+        "initial",
+    }
 )
 
 
-def _shorthand_size(value: str) -> bool | None:
+def _size_flag(value: str) -> Flag:
+    """Classify one size value: only an absolute length or keyword may clear a tiny size."""
+    number = _number(value)
+    if number is not None:
+        size, unit = number
+        if size <= 0:
+            return Flag.ON
+        if unit in _ABSOLUTE_UNITS:
+            return Flag.ON if _tiny(size, unit) else Flag.OFF
+        return Flag.INHERIT
+    return Flag.OFF if value in _SIZE_KEYWORDS else Flag.INHERIT
+
+
+def _font_size(value: str) -> Flag | None:
+    return _size_flag(value) if value else None
+
+
+def _shorthand_size(value: str) -> Flag | None:
     """The size inside a ``font`` shorthand: the first ``<size>[/<line-height>]`` token."""
+    if not value:
+        return None
     for token in _tokens(value):
-        number = _number(token.split("/", 1)[0])
-        if number is not None and (number[1] or number[0] == 0):
-            return _tiny(number)
-    return None
+        head = token.split("/", 1)[0]
+        number = _number(head)
+        if head in _SIZE_KEYWORDS or (number is not None and (number[1] or number[0] == 0)):
+            return _size_flag(head)
+    return Flag.INHERIT
+
+
+def _visibility(value: str) -> Flag:
+    if value in ("hidden", "collapse"):
+        return Flag.ON
+    return Flag.OFF if value in ("visible", "initial") else Flag.INHERIT
 
 
 def _off_screen(value: str) -> bool:
@@ -340,27 +406,80 @@ def _hides(name: str, value: str) -> bool:
     return name == "clip-path" and value.replace(" ", "").startswith("inset(100%")
 
 
+_GRADIENT: Final = re.compile(r"(?:repeating-)?(?:linear|radial|conic)-gradient\(")
+_NON_STOP: Final = re.compile(
+    r"[+-]?[\d.]+[a-z%]*|(?:to|circle|ellipse|at|closest|farthest|from|in)\b.*"
+)
+
+
+def _arguments(text: str, start: int) -> tuple[list[str], int]:
+    """The comma-separated arguments of the call whose ``(`` ends before ``start``."""
+    arguments: list[str] = []
+    depth = 1
+    begin = start
+    for index in range(start, len(text)):
+        char = text[index]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                arguments.append(text[begin:index])
+                return arguments, index + 1
+        elif char == "," and depth == 1:
+            arguments.append(text[begin:index])
+            begin = index + 1
+    arguments.append(text[begin:])
+    return arguments, len(text)
+
+
+def _gradient_color(value: str) -> ColorValue:
+    """The one colour every stop of every gradient has, else ``None``; any ``url(`` spoils it."""
+    if "url(" in value:
+        return None
+    stops: set[Color] = set()
+    position = 0
+    while True:
+        match = _GRADIENT.search(value, position)
+        if match is None:
+            return next(iter(stops)) if len(stops) == 1 else None
+        arguments, position = _arguments(value, match.end())
+        for argument in arguments:
+            text = argument.strip()
+            found = first_color(text)
+            if isinstance(found, tuple):
+                stops.add(found)
+            elif found is not None or not _NON_STOP.fullmatch(text):
+                return None  # a transparent or unrecognised stop: the backdrop is unknown
+
+
 def _background(name: str, value: str) -> tuple[bool, ColorValue]:
-    """Return (has an image or gradient, the first colour that is not transparent)."""
+    """Return (has an image or gradient, the colour the backdrop is known to have).
+
+    A declared fallback colour counts even with an image present. Without one, a gradient whose
+    stops all share a colour is that colour; a ``url()`` or mixed gradient leaves it unknown.
+    """
     image = "url(" in value or "gradient(" in value
-    if name == "background-image":
-        return image, None
-    found = first_color(value)
-    return image, None if found == "transparent" else found
+    found = None if name == "background-image" else first_color(value)
+    if found == "transparent":
+        found = None
+    if found is None and image:
+        found = _gradient_color(value)
+    return image, found
 
 
 def _props(declarations: Declarations) -> Props:
-    tiny: bool | None = None
-    invisible: bool | None = None
+    tiny: Flag | None = None
+    invisible: Flag | None = None
     color: ColorValue = None
     background: ColorValue = None
     image = False
     for name, value, _ in declarations:
         if name == "visibility" and value:
-            invisible = value in ("hidden", "collapse")
+            invisible = override(invisible, _visibility(value))
         elif name in ("font-size", "font"):
             size = _font_size(value) if name == "font-size" else _shorthand_size(value)
-            tiny = tiny if size is None else size
+            tiny = override(tiny, size)
         elif name == "color":
             color = _color(value) or color
         elif name in ("background", "background-color", "background-image"):
@@ -478,12 +597,14 @@ def parse_stylesheet(css: str) -> Sheet:
 __all__ = [
     "Color",
     "ColorValue",
+    "Flag",
     "Props",
     "Sheet",
     "Style",
     "evaluate",
     "first_color",
     "normalize",
+    "override",
     "parse_declarations",
     "parse_stylesheet",
     "preprocess",
