@@ -9,7 +9,8 @@ stylesheets. Everything else is ignored.
 Cascade: for the inherited properties an ``!important`` declaration beats a normal one from any
 origin, otherwise the later wins; ``display`` and the other subtree-hiding properties are an OR,
 so a conflict hides. An unquoted ``url(`` is one token (CSS Syntax 4.3.6); a quote inside it, or an
-unclosed comment, makes the caller treat the element as hidden. A background image with a known
+unclosed comment, or an escape inside a function name, makes the caller treat the element as
+hidden. Input is preprocessed first (CR, CRLF and FF become LF). A background image with a known
 fallback colour is compared by that colour; with none the backdrop is unknown and text is kept.
 """
 
@@ -31,6 +32,7 @@ _URL: Final = (
     r"(?:[lL]|\\0{0,4}[46][cC][ \t\n]?)\((?![ \t\r\n\f]*[\"'])(?:[^)\\]|\\.)*\)?"
 )
 _SKIPPED: Final = _URL + r"""|\\.|"(?:[^"\\\n]|\\.)*"?|'(?:[^'\\\n]|\\.)*'?"""
+_IDENT_RUN: Final = re.compile(r"(?:[\w-]|\\(?:[0-9a-fA-F]{1,6}[ \t\n]?|.))+", re.DOTALL)
 _URL_BODY: Final = re.compile(r"url\((?![ \t\r\n\f]*[\"'])([^)]*)\)?")
 _COMMENT_SCAN: Final = re.compile(_SKIPPED + r"|/\*", re.DOTALL)
 _STRUCTURE: Final = re.compile(_SKIPPED + r"|[(){};]", re.DOTALL)
@@ -131,9 +133,16 @@ def _unescape_match(match: re.Match[str]) -> str:
     return chr(code) if 0 < code <= 0x10FFFF and not 0xD800 <= code <= 0xDFFF else ""
 
 
+def preprocess(text: str) -> str:
+    """CSS input preprocessing (CSS Syntax 3.3): CR, CRLF and FF become LF, NUL becomes U+FFFD."""
+    if "\r" in text or "\f" in text:
+        text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\f", "\n")
+    return text.replace("\x00", chr(0xFFFD))
+
+
 def normalize(text: str) -> str:
     """Decode CSS escapes, lower-case and collapse whitespace."""
-    return " ".join(_ESCAPE.sub(_unescape_match, text).lower().split())
+    return " ".join(_ESCAPE.sub(_unescape_match, preprocess(text)).lower().split())
 
 
 def strip_comments(text: str) -> tuple[str, bool]:
@@ -141,6 +150,7 @@ def strip_comments(text: str) -> tuple[str, bool]:
 
     The second value is true when a comment is never closed (the rest is dropped).
     """
+    text = preprocess(text)
     parts: list[str] = []
     index = last = 0
     while True:
@@ -175,6 +185,14 @@ def _quote_in_url(text: str) -> bool:
     return any('"' in m.group(1) or "'" in m.group(1) for m in _URL_BODY.finditer(unescaped))
 
 
+def _escaped_function_name(text: str) -> bool:
+    """Whether an identifier written with an escape names a function, as in ``\\75rl(``."""
+    return any(
+        "\\" in run.group() and text[run.end() : run.end() + 1] == "("
+        for run in _IDENT_RUN.finditer(text)
+    )
+
+
 def parse_declarations(text: str) -> tuple[Declarations, bool]:
     """Split a declaration list; the flag asks the caller to fail closed.
 
@@ -182,7 +200,7 @@ def parse_declarations(text: str) -> tuple[Declarations, bool]:
     disagree about.
     """
     text, unclosed = strip_comments(text)
-    unsafe = unclosed or _quote_in_url(text)
+    unsafe = unclosed or _quote_in_url(text) or _escaped_function_name(text)
     parts: list[str] = []
     depth = start = 0
     for match in _STRUCTURE.finditer(text):
@@ -468,5 +486,6 @@ __all__ = [
     "normalize",
     "parse_declarations",
     "parse_stylesheet",
+    "preprocess",
     "strip_comments",
 ]
