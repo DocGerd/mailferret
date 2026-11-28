@@ -6,10 +6,11 @@ import imaplib
 import re
 import socket
 import ssl
-from collections.abc import Callable
 
 import pytest
 
+from mailferret.imap import ConnectError, TlsMode, build_context
+from mailferret.imap import connect as mf_connect
 from tests.fixtures.corpus import committed
 from tests.integration.conftest import (
     ACCOUNTS,
@@ -19,7 +20,6 @@ from tests.integration.conftest import (
     Greenmail,
     connect,
 )
-from tests.integration.tls import build_context
 
 ALICE = "alice@example.com"
 BOB = "bob@example.com"
@@ -37,6 +37,10 @@ def test_ca_file_required_and_sufficient(greenmail: Greenmail) -> None:
     """T-07: verification fails without the CA and passes with it, through the context builder."""
     with pytest.raises(ssl.SSLCertVerificationError):
         connect(None)
+    with pytest.raises(ConnectError) as err:
+        mf_connect(HOST, IMAPS_PORT, TlsMode.IMPLICIT)
+    assert err.value.code == "tls_verify_failed"
+    mf_connect(HOST, IMAPS_PORT, TlsMode.IMPLICIT, ca_file=greenmail.ca_file).close()
     conn = connect(greenmail.ca_file)
     try:
         assert conn.login(ALICE, ACCOUNTS[ALICE])[0] == "OK"
@@ -130,37 +134,29 @@ def test_seen_control_fetch_body_sets_seen(greenmail: Greenmail) -> None:
         conn.logout()
 
 
-class _Recorder(imaplib.IMAP4):
-    sent: list[bytes]
-
-    def send(self, data: bytes) -> None:
-        self.sent.append(bytes(data))
-        super().send(data)
-
-
-def test_plaintext_port_has_no_starttls_and_no_login_sent(greenmail: Greenmail) -> None:
+def test_plaintext_port_has_no_starttls_and_no_login_sent(
+    greenmail: Greenmail, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """T-07: no STARTTLS on the real server -> hard error before any LOGIN; backend untouched."""
     gets: list[str] = []
+    sent: list[bytes] = []
+    real_send = imaplib.IMAP4.send
+
+    def recording_send(self: imaplib.IMAP4, data: bytes) -> None:
+        sent.append(bytes(data))
+        real_send(self, data)
+
+    monkeypatch.setattr(imaplib.IMAP4, "send", recording_send)
 
     def backend_get(account: str) -> str:
         gets.append(account)
         return ACCOUNTS[account]
 
-    def connect_starttls_required(get: Callable[[str], str]) -> None:
-        # Stand-in for the D1 policy; swapped for the real connect() in issue #26.
-        _Recorder.sent = []
-        conn = _Recorder(HOST, IMAP_PORT, timeout=10)
-        try:
-            if "STARTTLS" not in conn.capabilities:
-                raise ConnectionError("server does not offer STARTTLS")
-            conn.starttls()
-            conn.login(ALICE, get(ALICE))
-        finally:
-            conn.shutdown()
-
-    with pytest.raises(ConnectionError):
-        connect_starttls_required(backend_get)
-    wire = b"".join(_Recorder.sent)
+    with pytest.raises(ConnectError) as err:
+        mf_connect(HOST, IMAP_PORT, TlsMode.STARTTLS)
+        backend_get(ALICE)
+    assert err.value.code == "starttls_unavailable"
+    wire = b"".join(sent)
     assert not re.search(rb"(?i)\bLOGIN\b|\bAUTHENTICATE\b", wire)
     assert gets == []
 

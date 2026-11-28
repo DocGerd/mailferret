@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from mailferret.imap import build_context
 from tests.fixtures.corpus import Fixture, committed
-from tests.integration.tls import build_context
 from tests.support.imap_fake import OpensslUnavailable, make_tls_material
 
 COMPOSE_FILE = Path(__file__).parent / "docker-compose.yml"
