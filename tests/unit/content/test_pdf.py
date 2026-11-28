@@ -697,7 +697,20 @@ def _wait_dead(pid: int) -> bool:
     return False
 
 
-@pytest.mark.parametrize("worker_exits", [False, True], ids=["hangs", "exits_leaving_child"])
+@pytest.mark.parametrize(
+    "worker_exits",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                sys.platform != "win32" and not hasattr(os, "waitid"),
+                reason="a reaped leader's group is never killed (no waitid)",
+            ),
+        ),
+    ],
+    ids=["hangs", "exits_leaving_child"],
+)
 def test_descendants_of_the_worker_are_killed(tmp_path: Path, worker_exits: bool) -> None:
     pidfile = tmp_path / "child.pid"
     code = (
