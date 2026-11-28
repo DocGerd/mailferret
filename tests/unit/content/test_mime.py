@@ -759,11 +759,16 @@ def test_base64_with_padding_mid_stream() -> None:
     assert decode_part(_part("base64"), b"YWI=\r\nY2", partial=True).text == "ab"
 
 
-def test_base64_padding_flood_is_linear() -> None:
+@pytest.mark.parametrize("unit", [b"QQ==", b"A=", b"=", b"QQ=\r\n"])
+def test_base64_padding_flood_stays_within_a_small_multiple_of_l02(unit: bytes) -> None:
+    limits = Limits()
+    data = unit * (limits.max_part_bytes // len(unit))
+    results: list[mime.DecodedPart] = []
     started = time.monotonic()
-    decode_part(_part("base64"), b"QQ==" * (Limits().max_part_bytes // 4))
-    decode_part(_part("base64"), b"=" * Limits().max_part_bytes)
+    peak = _peak(lambda: results.append(decode_part(_part("base64"), data, limits=limits)))
     assert time.monotonic() - started < 10
+    assert results[0].text is not None
+    assert peak < 6 * limits.max_part_bytes
 
 
 def test_a_plain_outside_the_group_never_beats_an_html_alternative() -> None:

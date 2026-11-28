@@ -30,6 +30,7 @@ _DEFAULT_LIMITS: Final = Limits()
 _TOKEN: Final = re.compile(r"[a-z0-9!#$&^_.+-]{1,64}")
 _TYPE: Final = re.compile(r"[a-z0-9!#$&^_.+-]{1,64}/[a-z0-9!#$&^_.+-]{1,64}")
 _MAX_BOUNDARY: Final = 128
+_PADDING: Final = re.compile(rb"=+")
 _SCAN_FACTOR: Final = 4
 _MAX_PARAM_PAIRS: Final = 64
 _MAX_ENCODING_CHARS: Final = 32
@@ -527,10 +528,14 @@ def attachment_fetchable(part: PartInfo, limits: Limits = _DEFAULT_LIMITS) -> bo
 
 
 def _decode_base64(data: bytes, *, partial: bool) -> bytes:
-    segments = re.split(rb"=+", data.translate(None, _BASE64_JUNK))
-    out = [_decode_base64_unit(seg, final=True) for seg in segments[:-1]]
-    out.append(_decode_base64_unit(segments[-1], final=not partial))
-    return b"".join(out)
+    clean = data.translate(None, _BASE64_JUNK)
+    out = bytearray()
+    pos = 0
+    for run in _PADDING.finditer(clean):
+        out += _decode_base64_unit(clean[pos : run.start()], final=True)
+        pos = run.end()
+    out += _decode_base64_unit(clean[pos:], final=not partial)
+    return bytes(out)
 
 
 def _decode_base64_unit(unit: bytes, *, final: bool) -> bytes:
