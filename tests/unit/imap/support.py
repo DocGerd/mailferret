@@ -49,6 +49,13 @@ def make_sink(
     imap.untagged_responses = {}
     imap._encoding = "ascii"
     imap.tagre = re.compile(rb"(?P<tag>A\d+) (?P<type>[A-Z]+) (?P<data>.*)", re.ASCII)
+    imap._mode_ascii()
+    imap._idle_capture = False
+    imap._idle_responses = []
+    imap._cmd_log_len = 10
+    imap._cmd_log_idx = 0
+    imap._cmd_log = {}
+    imap.tagged_commands = {}
     if greeting:
         imap._mf.lines_read = 1
     return imap

@@ -25,6 +25,7 @@ from tests.unit.imap.conftest import Opener
 from tests.unit.imap.support import arm, make_sink
 
 OK = "{tag} OK done\r\n"
+AMPLIFICATION_BUDGET = 40
 
 
 def _logged_in(server: FakeImapServer, opener: Opener, limits: Limits | None = None) -> Any:
@@ -194,16 +195,18 @@ def test_what_imapclient_reads_after_a_command_survives_until_the_next_one(
     assert "EXISTS" not in session._imap.untagged_responses
 
 
+@pytest.mark.parametrize("token", [b"\\a ", b"(a) ", b"NIL "])
 def test_dense_token_fetch_parse_stays_within_a_multiple_of_the_total(
-    server: FakeImapServer, opener: Opener
+    server: FakeImapServer, opener: Opener, token: bytes
 ) -> None:
-    """imapclient turns each ``\\a`` into a bytes object: the parse amplifies the wire bytes.
+    """imapclient turns each token into objects: the parse amplifies the wire bytes.
 
-    The bound asserted here is the ratio the design lives with; the PR reports the measurement.
+    A FETCH response at its total, made of the densest tokens, is parsed by imapclient; the peak
+    must stay under ``AMPLIFICATION_BUDGET`` times the total. The PR reports the measured ratio
+    and the worst case it implies at the `L-26` ceiling.
     """
     total = 2 * MIB
-    tokens = b"\\a " * 100_000
-    line = b"* %d FETCH (UID %d FLAGS (" + tokens.rstrip() + b"))\r\n"
+    line = b"* %d FETCH (UID %d FLAGS (" + token * ((total // 2 - 2_000) // len(token)) + b"))\r\n"
     server.on("UID FETCH", [line % (1, 1), line % (2, 2), OK])
     limits = Limits(max_line_bytes=MIB, max_command_response_bytes=total)
     session = _logged_in(server, opener, limits)
@@ -218,7 +221,7 @@ def test_dense_token_fetch_parse_stays_within_a_multiple_of_the_total(
     finally:
         tracemalloc.stop()
     assert sorted(result) == [1, 2]
-    assert peak <= 40 * total, f"parse amplification {peak / total:.1f}x of the total"
+    assert peak <= AMPLIFICATION_BUDGET * total, f"parse amplification {peak / total:.1f}x"
 
 
 def test_a_read_that_bypasses_the_hook_is_caught_at_the_next_line() -> None:
