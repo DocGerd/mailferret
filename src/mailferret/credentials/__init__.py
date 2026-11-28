@@ -1,5 +1,6 @@
 """Credential backends (A§2, A§2.1). Only this package touches secrets."""
 
+from mailferret.credentials.command_backend import CommandBackend
 from mailferret.credentials.errors import (
     CredentialBackendError,
     CredentialBackendUnavailable,
@@ -15,6 +16,7 @@ from mailferret.credentials.secret import Secret, accept_output, validate_new_se
 
 __all__ = [
     "BackendDescription",
+    "CommandBackend",
     "CredentialBackend",
     "CredentialBackendError",
     "CredentialBackendUnavailable",
