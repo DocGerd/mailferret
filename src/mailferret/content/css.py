@@ -844,7 +844,7 @@ def evaluate(declarations: Declarations) -> Style:
 # --- stylesheets -----------------------------------------------------------------------------
 
 
-_SPECIFICITY: Final = {"t": 1, "c": 10, "tc": 11, "i": 100}  # by selector kind
+_SPECIFICITY: Final = {"t": 1, "c": 10, "tc": 11, "i": 100, "ti": 101}  # by selector kind
 _Key = tuple[str, str]
 # Per selector, the last effect on each inherited property and level: (rule position, value).
 _Entries = dict[tuple[bool, str], tuple[int, Props]]
@@ -867,7 +867,8 @@ def _single_properties(props: Props) -> list[tuple[str, Props]]:
 
 
 class Sheet:
-    """Top-level rules whose selector is one tag, ``.class``, ``#id`` or ``tag.class``.
+    """Top-level rules whose selector is exactly ``tag``, ``.class``, ``#id``, ``tag.class`` or
+    ``tag#id``; every other selector is ignored, never reduced to a part of itself.
 
     Matching rules are applied in cascade order: specificity, then position in the sheets (all
     ``<style>`` elements in document order), never the order of the ``class`` attribute.
@@ -906,7 +907,7 @@ class Sheet:
         keys += [("c", c) for c in classes]
         keys += [("tc", f"{tag}.{c}") for c in classes]
         if ident:
-            keys.append(("i", ident))
+            keys += [("i", ident), ("ti", f"{tag}#{ident}")]
         flags = Style()
         applicable: list[tuple[int, int, bool, Props]] = []
         for key in dict.fromkeys(keys):
@@ -942,7 +943,7 @@ def _add_rule(sheet: Sheet, prelude: str, body: str) -> None:
         if kind is None:
             sheet.add(("t", str(tag)), style, position)
         elif kind == "#":
-            sheet.add(("i", name), style, position)
+            sheet.add(("ti", f"{tag}#{name}") if tag else ("i", name), style, position)
         elif tag:
             sheet.add(("tc", f"{tag}.{name}"), style, position)
         else:

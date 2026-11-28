@@ -480,3 +480,19 @@ def test_a_key_with_many_rules_stays_cheap_and_keeps_the_last_effect() -> None:
     for _ in range(20_000):
         assert sheet.style_for("b", ["g", "f"], None).tiny is Flag.ON
     assert time.monotonic() - started < 3.0
+
+
+def test_selectors_are_stored_only_in_one_of_the_supported_forms() -> None:
+    sheet = parse_stylesheet("span#x{font-size:0}#x{font-size:14px}")
+    assert sheet.style_for("span", [], "x").tiny is Flag.ON
+    assert sheet.style_for("div", [], "x").tiny is Flag.OFF
+    sheet = parse_stylesheet("#x{font-size:14px}span#x{font-size:0}")
+    assert sheet.style_for("span", [], "x").tiny is Flag.ON
+    assert sheet.style_for("div", [], "x").tiny is Flag.OFF
+    mixed = parse_stylesheet(".a, .b.a{font-size:0}")
+    assert mixed.style_for("b", ["a"], None).tiny is Flag.ON
+    assert mixed.style_for("b", ["b"], None).tiny is None
+    for selector in (".a.b", "div .x", ".a#x", "span.a.b", "a[href]", "b:hover", "*", ".a > .b"):
+        ignored = parse_stylesheet(f"{selector}{{font-size:0}}")
+        for tag, classes, ident in (("b", ["a", "b", "x"], "x"), ("div", ["x"], None)):
+            assert ignored.style_for(tag, classes, ident).tiny is None, selector

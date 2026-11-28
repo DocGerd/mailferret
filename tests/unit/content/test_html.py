@@ -327,6 +327,21 @@ HIDDEN_VECTORS = {
         "<style>.h{{font-size:14px}}.v{{font-size:14px}}.h{{font-size:0}}</style>"
         "<span class='v h'>{c}</span>"
     ),
+    "selector_tag_id_then_id": (
+        "<style>span#x{{font-size:0}}#x{{font-size:14px}}</style><span id=x>{c}</span>"
+    ),
+    "selector_id_then_tag_id": (
+        "<style>#x{{font-size:14px}}span#x{{font-size:0}}</style><span id=x>{c}</span>"
+    ),
+    "selector_tag_id_visibility_then_id": (
+        "<style>span#x{{visibility:hidden}}#x{{visibility:visible}}</style><span id=x>{c}</span>"
+    ),
+    "selector_id_then_tag_id_visibility": (
+        "<style>#x{{visibility:visible}}span#x{{visibility:hidden}}</style><span id=x>{c}</span>"
+    ),
+    "selector_tag_id_beats_class": (
+        "<style>span#x{{font-size:0}}.v{{font-size:14px}}</style><span id=x class=v>{c}</span>"
+    ),
     "transparent_bg_no_coloured_ancestor": (
         '<span style="background:transparent;color:#fff">{c}</span>'
     ),
@@ -483,6 +498,17 @@ def test_hidden_vector_is_removed(name: str) -> None:
         '<td style="font-size:0"><span style="font-size:12px;font-size:13px">{c}</span></td>',
         '<style>.a{{font-size:12px}}</style><div style="font-size:0"><b class=a>{c}</b></div>',
         '<td background="https://example.com/b.png" style="color:#fff">{c}</td>',
+        "<style>span#x{{font-size:0}}</style><div id=x>{c}</div>",
+        "<style>span#x{{visibility:hidden}}</style><b id=x>{c}</b>",
+        "<style>#x{{font-size:14px}}span#x{{font-size:0}}</style><div id=x>{c}</div>",
+        "<style>.a.b{{font-size:0}}</style><span class=a>{c}</span>",
+        "<style>div .x{{font-size:0}}</style><span class=x>{c}</span>",
+        "<style>.a#x{{font-size:0}}</style><span id=x class=a>{c}</span>",
+        "<style>#x.a{{font-size:0}}</style><span id=x class=a>{c}</span>",
+        "<style>span.a.b{{font-size:0}}</style><span class='a b'>{c}</span>",
+        "<style>input[type=text]{{font-size:0}}</style><span type=text>{c}</span>",
+        "<style>span:first-child{{font-size:0}}</style><span>{c}</span>",
+        "<style>div > .x{{font-size:0}}</style><div><span class=x>{c}</span></div>",
         "<style>.h{{font-size:0}}.v{{font-size:14px}}</style><span class='h v'>{c}</span>",
         "<style>.h{{font-size:0}}.v{{font-size:14px}}</style><span class='v h'>{c}</span>",
         "<style>.h{{visibility:hidden}}.v{{visibility:visible}}</style>"
@@ -1199,6 +1225,70 @@ def test_fuzz_class_attribute_order_never_changes_the_cascade(
     attributes = (f"class='{' '.join(classes)}'" if classes else "") + (" id=i" if ident else "")
     result = html_to_text(f"{_CASCADE_SHEET}<span {attributes}>{CANARY}</span>")
     assert (result.text == CANARY) == _cascade_shows(classes, ident)
+
+
+_SELECTORS = [
+    # (selector, specificity); None: not one of the five supported forms, so it never applies
+    ("span", 1),
+    (".a", 10),
+    (".b", 10),
+    ("#x", 100),
+    ("span.a", 11),
+    ("div.b", 11),
+    ("span#x", 101),
+    ("div#x", 101),
+    (".a.b", None),
+    ("span.a.b", None),
+    (".a#x", None),
+    ("#x.a", None),
+    ("div .a", None),
+    ("div > .a", None),
+    ("span:first-child", None),
+    ("a[href]", None),
+    ("*", None),
+]
+
+
+def _selector_matches(selector: str, tag: str, ident: bool, classes: list[str]) -> bool:
+    if selector.startswith("#"):
+        return ident
+    name = selector
+    if "#" in selector:
+        name, _, _ = selector.partition("#")
+        return name == tag and ident
+    if "." in selector:
+        name, _, cls = selector.partition(".")
+        return (not name or name == tag) and cls in classes
+    return name == tag
+
+
+@FUZZ
+@given(
+    st.lists(
+        st.tuples(st.sampled_from(_SELECTORS), st.sampled_from(["0", "14px"]), st.booleans()),
+        min_size=1,
+        max_size=7,
+    ),
+    st.sampled_from(["span", "div"]),
+    st.booleans(),
+    st.lists(st.sampled_from(["a", "b"]), unique=True, max_size=2),
+)
+def test_fuzz_only_exactly_supported_selectors_apply(
+    rules: list[tuple[tuple[str, int | None], str, bool]], tag: str, ident: bool, classes: list[str]
+) -> None:
+    sheet = "".join(
+        f"{selector}{{font-size:{size}{' !important' if important else ''}}}"
+        for (selector, _), size, important in rules
+    )
+    attributes = (" id=x" if ident else "") + (f" class='{' '.join(classes)}'" if classes else "")
+    html = f"<style>{sheet}</style><{tag}{attributes}>{CANARY}</{tag}>"
+    winners = [
+        (important, specificity, position, size)
+        for position, ((selector, specificity), size, important) in enumerate(rules)
+        if specificity is not None and _selector_matches(selector, tag, ident, classes)
+    ]
+    shown = max(winners)[3] != "0" if winners else True
+    assert (html_to_text(html).text == CANARY) == shown
 
 
 @FUZZ
