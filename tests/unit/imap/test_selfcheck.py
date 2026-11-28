@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import imaplib
 import logging
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -12,7 +13,7 @@ from imapclient import IMAPClient
 from imapclient.imap4 import IMAP4WithTimeout
 from imapclient.tls import IMAP4_TLS
 
-from mailferret.imap import ConnectError, TlsMode, connect
+from mailferret.imap import ConnectError, HookBypassed, TlsMode, connect
 from mailferret.imap.guard import GuardMixin
 from mailferret.imap.logging_pin import logging_is_pinned, pin_imapclient_logging
 from mailferret.imap.selfcheck import check_hooks, check_instance
@@ -233,7 +234,6 @@ def test_the_unstubbed_session_passes_the_same_liveness_checks(
 def test_a_session_with_no_probe_flag_fails_liveness_for_starttls(
     server: FakeImapServer, opener: Opener
 ) -> None:
-    from mailferret.imap import HookBypassed
 
     session = opener(server)
     with pytest.raises(HookBypassed) as err:
@@ -263,3 +263,37 @@ def test_leftover_pre_tls_untagged_entries_are_cleared_after_starttls(
     imap._command_complete("STARTTLS", tag)
     assert imap.untagged_responses == {}
     assert imap._mf.starttls_probed
+
+
+def _no_groups() -> re.Pattern[bytes]:
+    return re.compile(rb"(A\d+) ([A-Z]+) (.*)")
+
+
+@pytest.mark.parametrize("replacement", [None, "missing", b"A1 OK", _no_groups()])
+def test_a_missing_or_reshaped_tagre_fails_the_instance_check(
+    opener: Opener, server: FakeImapServer, replacement: object
+) -> None:
+    imap = opener(server)._imap
+    if replacement == "missing":
+        del imap.tagre
+    else:
+        imap.tagre = replacement
+    with pytest.raises(ConnectError) as err:
+        check_instance(imap, Limits())
+    assert err.value.code == "hook_unavailable"
+
+
+@pytest.mark.parametrize("replacement", [None, "missing", _no_groups()])
+def test_a_missing_or_reshaped_tagre_discards_the_session_at_the_next_line(
+    replacement: object,
+) -> None:
+    imap = make_sink(incoming=[b"A1 OK done\r\n"])
+    if replacement == "missing":
+        del imap.tagre
+    else:
+        imap.tagre = replacement  # type: ignore[assignment]
+    arm(imap)
+    with pytest.raises(HookBypassed) as err:
+        imap.readline()
+    assert err.value.check == "tagre"
+    assert imap.discarded
