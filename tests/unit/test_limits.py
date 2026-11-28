@@ -89,7 +89,7 @@ def test_model_is_frozen() -> None:
 
 @pytest.mark.parametrize(("key", "ceiling"), sorted(CEILINGS.items()))
 def test_merge_lowers_but_never_raises(key: str, ceiling: int) -> None:
-    floor = limits.LINE_OVERHEAD_BYTES + Limits().max_line_bytes + 1
+    floor = limits.FETCH_LINE_ALLOWANCE_BYTES + Limits().max_line_bytes
     lowest = floor if key == "max_response_line_bytes" else 1
     assert getattr(merge({key: lowest}), key) == lowest
     assert getattr(merge({key: ceiling}), key) == ceiling
@@ -100,15 +100,18 @@ def test_merge_lowers_but_never_raises(key: str, ceiling: int) -> None:
             Limits(**{key: bad})
 
 
-def test_a_line_total_that_cannot_hold_one_line_is_rejected() -> None:
+def test_a_line_total_that_cannot_hold_one_fetched_message_is_rejected() -> None:
     line = Limits().max_line_bytes
-    floor = line + limits.LINE_OVERHEAD_BYTES
+    floor = line + limits.FETCH_LINE_ALLOWANCE_BYTES
+    assert merge({"max_response_line_bytes": floor}).max_response_line_bytes == floor
     with pytest.raises(ValidationError, match="max_response_line_bytes"):
-        merge({"max_response_line_bytes": floor})
-    assert merge({"max_response_line_bytes": floor + 1}).max_response_line_bytes == floor + 1
+        merge({"max_response_line_bytes": floor - 1})
     with pytest.raises(ValidationError, match="max_response_line_bytes"):
-        merge({"max_response_line_bytes": floor - 1, "max_line_bytes": line})
-    assert merge({"max_line_bytes": 1024, "max_response_line_bytes": 2048})
+        merge({"max_response_line_bytes": line + 1000})
+    with pytest.raises(ValidationError, match="max_response_line_bytes"):
+        merge({"max_line_bytes": 1024, "max_response_line_bytes": 2048})
+    smaller = limits.FETCH_LINE_ALLOWANCE_BYTES + 1024
+    assert merge({"max_line_bytes": 1024, "max_response_line_bytes": smaller})
 
 
 def test_merge_ignores_none_and_rejects_unknown_and_non_int() -> None:
