@@ -40,7 +40,7 @@ class CredentialLimitExceeded(CredentialError):
 
 
 class CredentialRejected(CredentialError):
-    code = "rejected"
+    code = "error"
     message = "credential refused by the secret rule"
 
 

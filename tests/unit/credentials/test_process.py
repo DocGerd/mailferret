@@ -3,13 +3,16 @@ from __future__ import annotations
 import contextlib
 import os
 import signal
+import subprocess
 import sys
 import time
 import tracemalloc
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from mailferret.credentials import process
 from mailferret.credentials.errors import CredentialBackendError
 from mailferret.credentials.process import BoundedResult, minimal_env, run_bounded
 from mailferret.limits import CEILINGS
@@ -196,3 +199,67 @@ def test_minimal_env_drops_unlisted_variables() -> None:
     assert "SECRET_THING" not in env
     assert "PYTHON_KEYRING_BACKEND" not in env
     assert env["PASSWORD_STORE_DIR"] == "/s"  # noqa: S105
+
+
+def test_job_object_failure_kills_the_child_and_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spawned: list[subprocess.Popen[bytes]] = []
+    real_spawn = process._spawn
+
+    def spy(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+        proc = real_spawn(*args, **kwargs)
+        spawned.append(proc)
+        return proc
+
+    monkeypatch.setattr(process, "_USE_JOB", True)
+    monkeypatch.setattr(process, "_spawn", spy)
+    monkeypatch.setattr(process.JobObject, "create", classmethod(lambda _cls: None))
+    with pytest.raises(CredentialBackendError) as info:
+        run("import time; time.sleep(60)", tmp_path, deadline=5.0)
+    assert info.value.args == (CredentialBackendError.message,)
+    assert spawned
+    assert spawned[0].wait(timeout=5) is not None
+
+
+@posix_only
+@pytest.mark.skipif(not hasattr(os, "waitid"), reason="needs waitid")
+def test_killpg_runs_before_the_leader_is_reaped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    unreaped: list[bool] = []
+    real_killpg = os.killpg
+
+    def spy(pgid: int, sig: int) -> None:
+        flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
+        unreaped.append(os.waitid(os.P_PID, pgid, flags) is not None)
+        real_killpg(pgid, sig)
+
+    monkeypatch.setattr(process.os, "killpg", spy)
+    code = (
+        "import os, sys, time\n"
+        "if os.fork() == 0:\n"
+        "    time.sleep(60)\n"
+        "    os._exit(0)\n"
+        "print('x', flush=True)\n"
+        "os._exit(0)"
+    )
+    result, _ = run(code, tmp_path)
+    assert result.status == "timeout"
+    assert unreaped == [True]
+
+
+@posix_only
+def test_pipe_fds_are_not_leaked(tmp_path: Path) -> None:
+    def count() -> int:
+        return len(os.listdir("/dev/fd"))
+
+    run("print('x')", tmp_path)
+    before = count()
+    run("print('x')", tmp_path)
+    run("import time; time.sleep(60)", tmp_path)
+    run("pass", tmp_path, stdin_data=b"x" * 100)
+    deadline = time.monotonic() + 3
+    while count() > before and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert count() <= before

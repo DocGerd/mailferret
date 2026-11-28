@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 FAKE_KEYRING = """
-import os, sys, types
+import hashlib, os, sys, types
 store = os.environ["XDG_CONFIG_HOME"]
 errors = types.ModuleType("keyring.errors")
 for name, base in (("KeyringError", Exception),):
@@ -18,7 +18,7 @@ kr = types.ModuleType("keyring")
 class Backend:
     pass
 def _path(service, username):
-    return os.path.join(store, (service + "|" + username).replace("/", "_"))
+    return os.path.join(store, hashlib.sha256((service + "|" + username).encode()).hexdigest())
 def get_keyring():
     return Backend()
 def get_password(service, username):
