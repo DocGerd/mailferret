@@ -227,7 +227,7 @@ env = { PASSWORD_STORE_GPG_OPTS = "--pinentry-mode=error" }   # allowlisted name
 
 Choices, versions, release dates and vetting live in `docs/research/library-survey.md` (one dated snapshot, the only copy). Runtime: `mcp` (v2, `>=2.3,<3`), `imapclient` (pinned exactly, §2.2), `inscriptis` (+ `lxml`), `pypdf` (no extras), `keyring` (+ its vetted platform transitives), `platformdirs`, `click`, `pydantic`, `tomlkit`. Dev: `ruff`, `mypy`, `pytest`, `hypothesis` (dev-only, MPL-2.0, survey); GreenMail in Docker; `uv` as the launcher. No dependency outside the survey's vetted table (R§10, SECURITY §6).
 
-Python floor `>=3.11`. Rejected: fastmcp, aioimaplib, html2text, pymupdf, tomli-w, keyrings.alt (survey). Not added: charset detection libraries (the stdlib fallback chain is enough, R§11), justhtml (optional fallback only if inscriptis fails vetting later).
+Python floor `>=3.13`. Rejected: fastmcp, aioimaplib, html2text, pymupdf, tomli-w, keyrings.alt (survey). Not added: charset detection libraries (the stdlib fallback chain is enough, R§11), justhtml (optional fallback only if inscriptis fails vetting later).
 
 ## 9. Claude Code plugin
 
