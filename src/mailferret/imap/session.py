@@ -61,8 +61,11 @@ class ReadOnlySession:
         """
         with self._mark:
             self._expired = True
+        self._imap.discard()
+        # Not SSLSocket.shutdown: it detaches the TLS object first, and a concurrent sendall
+        # would then fall back to the plain socket and write in the clear.
         with contextlib.suppress(Exception):
-            self._imap.sock.shutdown(socket.SHUT_RDWR)
+            socket.socket.shutdown(self._imap.sock, socket.SHUT_RDWR)
 
     def close(self) -> None:
         self._imap.discard()
@@ -168,19 +171,20 @@ class ReadOnlySession:
 
     def _classify(self, exc: Exception, *, login: bool, sent: bool) -> SessionError:
         completion = self._imap.last_completion
-        if isinstance(exc, SessionError):
-            return exc
         if self._expired:
             return DeadlineExceeded()
+        if isinstance(exc, SessionError):
+            return exc
         if isinstance(exc, TimeoutError):
             return SessionTimeout()
         if isinstance(exc, imaplib.IMAP4.abort | IMAPClientAbortError):
             return ConnectionDropped()
         if isinstance(exc, OSError):
             return ConnectionDropped()
-        rejected = isinstance(exc, IMAPClientError | imaplib.IMAP4.error) and completion in (
-            "NO",
-            "BAD",
+        rejected = (
+            sent
+            and isinstance(exc, IMAPClientError | imaplib.IMAP4.error)
+            and completion in ("NO", "BAD")
         )
         if rejected and login:
             return LoginRejected()
