@@ -190,6 +190,27 @@ def test_literal_plus_is_refused_by_the_gate_even_when_imapclient_would_send_it(
         assert not session.usable
 
 
+@pytest.mark.parametrize(
+    "atom", ["{00000000005+}", "{" + "0" * 40 + "5+}", "{" + "0" * 5000 + "5+}"]
+)
+def test_a_padded_literal_plus_atom_in_search_text_never_reaches_the_wire(
+    tls_material: Any, opener: Opener, atom: str
+) -> None:
+    """imapclient leaves such an atom unquoted; the gate refuses it by its shape alone."""
+    with FakeImapServer(
+        tls=tls_material, implicit_tls=True, capabilities=["IMAP4rev1", "LITERAL+"]
+    ) as server:
+        _script(server)
+        session = opener(server)
+        session.login("user@example.com", "secret")
+        with pytest.raises(ReadOnlyViolation) as err:
+            session.search(["TEXT", atom])
+        assert err.value.reason == "literal_plus_refused"
+        assert not any("SEARCH" in c.line for c in server.commands)
+        assert not any("+}" in w for w in server.wire)
+        assert not session.usable
+
+
 def test_literal_plus_is_refused_when_the_server_does_not_advertise_it(
     tls_material: Any, opener: Opener, monkeypatch: pytest.MonkeyPatch
 ) -> None:
