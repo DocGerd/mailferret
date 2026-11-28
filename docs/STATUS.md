@@ -1,18 +1,18 @@
 # Status
 
-Phase: 2a done (scaffold F0, spikes V1–V4) and the architecture update that folds the spike results into the design (issue #7). Phase 2b–2d under way: B1, B2, B3, B6, B7, C0, D0, D4, F1 merged.
+Phase: 2a done (scaffold F0, spikes V1–V4) and the architecture update that folds the spike results into the design (issue #7). Phase 2b–2d under way: B1, B2, B3, B4, B6, B7, C0, C1, D0, D1, D4, F1 merged.
 
 ## Done
 
 - Phase 1 design approved at Checkpoint 1 (`docs/ARCHITECTURE.md` §11).
 - Claude Code project configuration: `.claude/agents/mf-*`, `.claude/skills/`, `.claude/settings.json` (permissions, ruff/test/PII hooks), `.mcp.json` (Context7, development only), `scripts/pii_check.py` + `.githooks/` + `.github/workflows/pii-check.yml` (self-tests in `tests/tooling/`), `.gitattributes`.
 - Phase 2a: F0 scaffold; spikes V1–V4 (notes in `docs/research/v1-…` to `v4-…`); the architecture update (ARCHITECTURE §10 marks every item resolved, decided or open).
-- Phase 2b–2d: B1 (#17), B3 (#15), B7 (#16), C0 (#18), D0 (#19), B2 (#22), B6 (#23), F1 (#24), D4 (#25).
+- Phase 2b–2d: B1 (#17), B3 (#15), B7 (#16), C0 (#18), D0 (#19), B2 (#22), B6 (#23), F1 (#24), D4 (#25), D1 (#29), C1 (#31), B4 (#33, replacing #32); Windows backup-name fix (#28).
 
 ## Next
 
 1. One-time contributor setup: `git config core.hooksPath .githooks` (PII scan and tests on every commit).
-2. Start B4, C1, D1 (in flight), each in its own worktree (`docs/PLAN.md` §2, §5).
+2. Start B5, C2, C3, C5, D2 (in flight), each in its own worktree (`docs/PLAN.md` §2, §5).
 
 ## Open
 
@@ -27,8 +27,8 @@ Phase: 2a done (scaffold F0, spikes V1–V4) and the architecture update that fo
 - C4: research and run the Windows job-object and macOS `RLIMIT_AS` PDF worker memory caps on windows and macos CI runners, plus the cyclic page-tree and 100,000-page bombs (A§10 item 10). Until then T-06 scopes the memory guarantee to Linux.
 - Manual checks only a user can run: ARCHITECTURE §10 items 5, 7 (the client- or `wsl.exe`-launched part), 9, 14, 19, 21 and 22.
 - Task-owner notes from the architecture-update review: issue #14 (D2, D5, B4, B5, C4, E3, P3).
-- Task-owner notes from the B1, B3, B7, C0, D0, B2, B6, F1 and D4 reviews: also issue #14.
-- Issue #26: D1 swaps the D4 integration stand-ins for `imap/` code.
+- Task-owner notes from the B1, B3, B7, C0, D0, B2, B6, F1, D4, D1, C1 and B4 reviews: also issue #14.
+- `lazy-importer` is a BORDERLINE runtime dependency (via keyring on Python 3.11); re-check when it has a second release (`docs/research/library-survey.md`).
 - Parked: issue #10, commit-guard hardening. The guard stays best effort; `.githooks` and CI `scan` enforce.
 
 ## Contributor notes
