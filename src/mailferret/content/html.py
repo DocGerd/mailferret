@@ -22,11 +22,11 @@ from lxml import etree
 from mailferret.content.charset import decode_text
 from mailferret.content.css import (
     ColorValue,
+    Declarations,
     Flag,
     Props,
     Sheet,
     Style,
-    evaluate,
     first_color,
     normalize,
     parse_declarations,
@@ -321,13 +321,13 @@ def _classify(el: Any, walk: _Walk, inherited: _State) -> tuple[bool, bool, _Sta
         return False, True, inherited
     classes = [c.lower() for c in attrs.get("class", "").split()]
     ident = attrs.get("id")
-    style = _attribute_style(el).merge(
-        walk.sheet.style_for(tag, classes, ident.lower() if ident else None)
-    )
+    declarations: Declarations = []
     if raw_style:
         declarations, unclosed = parse_declarations(raw_style)
         hidden = hidden or unclosed
-        style = style.merge(evaluate(declarations))
+    style = _attribute_style(el).merge(
+        walk.sheet.style_for(tag, classes, ident.lower() if ident else None, declarations)
+    )
     hidden = hidden or style.hidden
     background = inherited.background if style.background is None else style.background
     color = inherited.color if style.color is None else style.color

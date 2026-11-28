@@ -17,6 +17,11 @@ agree; otherwise the backdrop is unknown and text is kept.
 Hiding states inherit through a ``Flag`` allowlist: only a recognised value (an absolute size above
 one point, a size keyword, ``visible``, ``initial``) clears an inherited state. Relative sizes,
 ``inherit``, functions, garbage and the whole ``font`` shorthand never do.
+
+``var()`` in a hiding property is resolved from the custom properties of the same element (inline
+and matched rules) or its fallback; ``env()``, an unknown name, a cycle, a missing fallback and
+anything past the depth, count or size caps fail closed (hidden). Custom properties of ancestors
+are not inherited, so a var declared on a parent hides the child (over-hiding, noted).
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from __future__ import annotations
 import enum
 import math
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -102,6 +108,13 @@ def override(base: Flag | None, top: Flag | None) -> Flag | None:
     return top
 
 
+_RANK: Final = {None: 0, Flag.OFF: 1, Flag.INHERIT: 2, Flag.ON: 3}
+
+
+def _worse(first: Flag | None, second: Flag | None) -> Flag | None:
+    return first if _RANK[first] >= _RANK[second] else second
+
+
 @dataclass(frozen=True, slots=True)
 class Props:
     """Inherited properties of one importance level; ``None`` means not declared."""
@@ -111,6 +124,16 @@ class Props:
     color: ColorValue = None  # text colour
     background: ColorValue = None  # the known (fallback) colour, never "transparent"
     image: bool = False  # a background image or gradient
+
+    def combine(self, other: Props) -> Props:
+        """Merge without knowing the order: the more hiding state wins (ON, INHERIT, OFF)."""
+        return Props(
+            _worse(self.tiny, other.tiny),
+            _worse(self.invisible, other.invisible),
+            self.color,
+            self.background,
+            self.image,
+        )
 
     def merge(self, later: Props) -> Props:
         return Props(
@@ -130,15 +153,34 @@ class Style:
     shows. The inherited properties follow the cascade: important first, then the later one.
     """
 
-    hidden: bool = False  # the whole subtree is gone, whatever its children declare
+    direct: bool = False  # display, opacity, off-screen, ...: the subtree is gone
+    clipped: bool = False  # overflow clips
+    empty: bool = False  # a zero-size box
     normal: Props = Props()
     important: Props = Props()
 
+    @property
+    def hidden(self) -> bool:
+        """The whole subtree is gone, whatever its children declare."""
+        return self.direct or (self.clipped and self.empty)
+
     def merge(self, later: Style) -> Style:
         return Style(
-            self.hidden or later.hidden,
+            self.direct or later.direct,
+            self.clipped or later.clipped,
+            self.empty or later.empty,
             self.normal.merge(later.normal),
             self.important.merge(later.important),
+        )
+
+    def combine(self, other: Style) -> Style:
+        """Add declarations whose place in the cascade is unknown, assuming the worst."""
+        return Style(
+            self.direct or other.direct,
+            self.clipped or other.clipped,
+            self.empty or other.empty,
+            self.normal.combine(other.normal),
+            self.important.combine(other.important),
         )
 
     @property
@@ -358,7 +400,6 @@ _SIZE_KEYWORDS: Final = frozenset(
 # --- constant math functions -----------------------------------------------------------------
 
 _MATH_FUNCTIONS: Final = frozenset({"calc", "min", "max", "clamp"})
-_UNKNOWN_FUNCTIONS: Final = frozenset({"var", "env"})  # their value is not in the mail
 _FUNCTION: Final = re.compile(r"(-(?:webkit|moz)-)?([a-z][a-z0-9-]*)\(")
 _MATH_TOKEN: Final = re.compile(
     r"\s*(?:(?P<num>[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)(?P<unit>[a-z%]*)"
@@ -423,9 +464,9 @@ def _nonfinite(value: _Val) -> bool:
 class _MathParser:
     """Evaluates ``calc()``, ``min()``, ``max()`` and ``clamp()`` over constants only.
 
-    ``var()`` and ``env()`` are unknown, and so are ``%`` (unless ``percent`` gives its scale)
-    and ``em``/``rem`` (unless ``em`` is given). ``min()`` and ``clamp()`` still give an upper
-    bound, which is all the hiding checks need. Any other function fails closed.
+    ``%`` (unless ``percent`` gives its scale) and ``em``/``rem`` (unless ``em`` is given) are
+    unknown. ``min()`` and ``clamp()`` still give an upper bound, which is all the hiding checks
+    need. Any other function fails closed.
     """
 
     def __init__(self, tokens: list[_Token], em: float | None, percent: float | None) -> None:
@@ -499,10 +540,7 @@ class _MathParser:
             name = _canonical(text)
             if name in _MATH_FUNCTIONS:
                 return self._call(name, depth + 1)
-            if name not in _UNKNOWN_FUNCTIONS:
-                raise _FailClosed
-            self._skip_group()
-            return _UNKNOWN
+            raise _FailClosed
         if kind == "word":
             return (_CONSTANTS[text], True) if text in _CONSTANTS else _UNKNOWN
         raise _Bail
@@ -562,11 +600,11 @@ class _MathParser:
 def _math_value(value: str, em: float | None, percent: float | None = None) -> float | None:
     """The value (or an upper bound) of a constant math function, ``None`` if not understood.
 
-    A function other than ``var()``/``env()`` that is not implemented, a non-finite result and
-    nesting past the limit fail closed: ``-inf``, below every hiding threshold.
+    A function that is not implemented (``var()`` and ``env()`` are resolved before this), a
+    non-finite result and nesting past the limit fail closed: ``-inf``, under every threshold.
     """
     name = _function_name(value)
-    if name is None or name in _UNKNOWN_FUNCTIONS:
+    if name is None:
         return None
     if name not in _MATH_FUNCTIONS:
         return _DEEP
@@ -647,7 +685,7 @@ def _shorthand_size(value: str) -> Flag | None:
 
 def _visibility(value: str) -> Flag:
     name = _function_name(value)
-    if value in ("hidden", "collapse") or (name is not None and name not in _UNKNOWN_FUNCTIONS):
+    if value in ("hidden", "collapse") or name is not None:
         return Flag.ON
     return Flag.OFF if value in ("visible", "initial") else Flag.INHERIT
 
@@ -679,6 +717,8 @@ def _empty_size(value: str) -> bool:
 
 def _hides(name: str, value: str) -> bool:
     """Whether one declaration removes the element and everything below it."""
+    if value == _FAILED and name in ("display", "mso-hide", "clip-path"):
+        return True
     if name == "display":
         return value == "none"
     if name == "opacity":
@@ -773,21 +813,159 @@ def _props(declarations: Declarations) -> Props:
     return Props(tiny, invisible, color, background, image)
 
 
-def evaluate(declarations: Declarations) -> Style:
-    """Reduce declarations to a ``Style``; later declarations of a property win per importance."""
-    hidden = clipped = zero_size = False
+# --- custom properties --------------------------------------------------------------------------
+
+_Sources = Sequence[Mapping[str, tuple[str, bool]]]  # custom property: value, !important
+_VARIABLE_PROPERTIES: Final = frozenset(
+    {
+        "display",
+        "visibility",
+        "opacity",
+        "mso-hide",
+        "clip-path",
+        "font-size",
+        "font",
+        "overflow",
+        "overflow-x",
+        "overflow-y",
+        *_OFFSET_PROPERTIES,
+        *_SIZE_PROPERTIES,
+    }
+)
+# A value no property can read as visible: functions it does not implement fail closed.
+_FAILED: Final = "fail-closed()"
+_CSS_WIDE: Final = frozenset({"initial", "inherit", "unset", "revert", "revert-layer"})
+_VAR: Final = re.compile(r"(?<![\w-])(var|env)\(")
+_MAX_VAR_DEPTH: Final = 6
+_MAX_VAR_USES: Final = 16
+_MAX_VAR_CHARS: Final = 1024
+_MAX_DEFERRED: Final = 8  # declarations per rule that read a variable; more hides the element
+_MAX_PENDING: Final = 64
+_MAX_CACHE: Final = 4096
+
+
+def _close(text: str, start: int) -> int:
+    """The index of the ``)`` closing a call that opened before ``start`` (end of text closes)."""
+    depth = 1
+    for index in range(start, len(text)):
+        if text[index] == "(":
+            depth += 1
+        elif text[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+    return len(text)
+
+
+def _lookup(sources: _Sources, name: str) -> str | None:
+    best: tuple[str, bool] | None = None
+    for source in sources:
+        found = source.get(name)
+        if found is not None and (best is None or found[1] or not best[1]):
+            best = found
+    return None if best is None else best[0]
+
+
+def _substitute(
+    text: str, sources: _Sources, stack: tuple[str, ...], depth: int, budget: list[int]
+) -> str | None:
+    """Replace ``var()`` by its custom property or fallback; ``None`` if that cannot be done.
+
+    ``env()``, an unknown or cyclic name, a missing fallback and anything past the depth, count
+    or size caps all give ``None``, which callers treat as hidden.
+    """
+    if len(text) > _MAX_VAR_CHARS or depth > _MAX_VAR_DEPTH:
+        return None
+    parts: list[str] = []
+    position = 0
+    while True:
+        match = _VAR.search(text, position)
+        if match is None:
+            parts.append(text[position:])
+            return "".join(parts)
+        parts.append(text[position : match.start()])
+        budget[0] -= 1
+        if match.group(1) == "env" or budget[0] < 0:
+            return None
+        close = _close(text, match.end())
+        name, comma, fallback = text[match.end() : close].partition(",")
+        name = name.strip()
+        if not name.startswith("--") or name in stack:
+            return None
+        value = _lookup(sources, name)
+        if value in _CSS_WIDE:
+            return None
+        if value is not None:
+            resolved = _substitute(value, sources, (*stack, name), depth + 1, budget)
+        elif comma:
+            resolved = _substitute(fallback.strip(), sources, stack, depth + 1, budget)
+        else:
+            return None
+        if resolved is None:
+            return None
+        parts.append(resolved)
+        position = close + 1
+
+
+def _resolve(deferred: Declarations, sources: _Sources) -> Style:
+    """Evaluate declarations that read a variable, a failure becoming ``_FAILED``."""
+    resolved: Declarations = []
+    for name, value, important in deferred:
+        text = _substitute(value, sources, (), 0, [_MAX_VAR_USES])
+        resolved.append((name, _FAILED if text is None else text, important))
+    return _evaluate(resolved)
+
+
+def _split(
+    declarations: Declarations,
+) -> tuple[Declarations, dict[str, tuple[str, bool]], Declarations]:
+    """Separate plain declarations, custom properties and those that read a variable."""
+    plain: Declarations = []
+    custom: dict[str, tuple[str, bool]] = {}
+    deferred: Declarations = []
+    for name, value, important in declarations:
+        if name.startswith("--"):
+            known = custom.get(name)
+            if known is None or important or not known[1]:
+                custom[name] = (value, important)
+        elif name in _VARIABLE_PROPERTIES and ("var(" in value or "env(" in value):
+            deferred.append((name, value, important))
+        else:
+            plain.append((name, value, important))
+    return plain, custom, deferred
+
+
+def _evaluate(declarations: Declarations) -> Style:
+    direct = clipped = empty = False
     for name, value, _ in declarations:
         if _hides(name, value):
-            hidden = True
+            direct = True
         elif name in ("overflow", "overflow-x", "overflow-y"):
-            clipped = clipped or any(word in _CLIPPING for word in value.split())
+            clipped = (
+                clipped or value == _FAILED or any(word in _CLIPPING for word in value.split())
+            )
         elif name in _SIZE_PROPERTIES:
-            zero_size = zero_size or _empty_size(value)
+            empty = empty or _empty_size(value)
     return Style(
-        hidden or (clipped and zero_size),
+        direct,
+        clipped,
+        empty,
         _props([d for d in declarations if not d[2]]),
         _props([d for d in declarations if d[2]]),
     )
+
+
+def evaluate(declarations: Declarations, sources: _Sources = ()) -> Style:
+    """Reduce declarations to a ``Style``; later declarations of a property win per importance.
+
+    A declaration that reads ``var()`` is resolved against the custom properties of these
+    declarations and of ``sources``; if it cannot be, the element is treated as hidden.
+    """
+    plain, custom, deferred = _split(declarations)
+    style = _evaluate(plain)
+    if deferred:
+        style = style.combine(_resolve(deferred, [*sources, custom]))
+    return style
 
 
 # --- stylesheets -----------------------------------------------------------------------------
@@ -798,28 +976,79 @@ class Sheet:
 
     def __init__(self) -> None:
         self._rules: dict[tuple[str, str], Style] = {}
+        self._custom: dict[tuple[str, str], dict[str, tuple[str, bool]]] = {}
+        self._deferred: dict[tuple[str, str], Declarations] = {}
+        self._cache: dict[tuple[tuple[str, str], ...], Style] = {}
 
-    def add(self, key: tuple[str, str], style: Style) -> None:
+    def add(
+        self,
+        key: tuple[str, str],
+        style: Style,
+        custom: Mapping[str, tuple[str, bool]] | None = None,
+        deferred: Declarations | None = None,
+    ) -> None:
         known = self._rules.get(key)
         self._rules[key] = style if known is None else known.merge(style)
+        if custom:
+            target = self._custom.setdefault(key, {})
+            for name, found in custom.items():
+                old = target.get(name)
+                if old is None or found[1] or not old[1]:
+                    target[name] = found
+        if deferred:
+            pending = self._deferred.setdefault(key, [])
+            if len(pending) + len(deferred) > _MAX_DEFERRED:
+                self._rules[key] = self._rules[key].merge(Style(direct=True))
+            else:
+                pending.extend(deferred)
 
     def update(self, other: Sheet) -> None:
         for key, style in other._rules.items():
-            self.add(key, style)
+            self.add(key, style, other._custom.get(key), other._deferred.get(key))
 
-    def style_for(self, tag: str, classes: list[str], ident: str | None) -> Style:
-        """Merge the matching rules; classes and ids are lower-case, as the sheet is."""
+    def style_for(
+        self,
+        tag: str,
+        classes: list[str],
+        ident: str | None,
+        inline: Declarations | None = None,
+    ) -> Style:
+        """Merge the matching rules and the inline declarations; the sheet is lower-case."""
         keys = [("t", tag)]
         keys += [("c", c) for c in classes]
         keys += [("tc", f"{tag}.{c}") for c in classes]
         if ident:
             keys.append(("i", ident))
         merged = Style()
+        sources: list[Mapping[str, tuple[str, bool]]] = []
+        pending: Declarations = []
         for key in keys:
             style = self._rules.get(key)
             if style is not None:
                 merged = merged.merge(style)
-        return merged
+            if key in self._custom:
+                sources.append(self._custom[key])
+            pending.extend(self._deferred.get(key, ()))
+        inline_custom: dict[str, tuple[str, bool]] = {}
+        inline_deferred: Declarations = []
+        if inline:
+            plain, inline_custom, inline_deferred = _split(inline)
+            merged = merged.merge(_evaluate(plain))
+            sources.append(inline_custom)
+            pending.extend(inline_deferred)
+        if len(pending) > _MAX_PENDING:
+            return merged.merge(Style(direct=True))
+        if not pending:
+            return merged
+        if inline_custom or inline_deferred:
+            return merged.combine(_resolve(pending, sources))
+        cache_key = tuple(keys)
+        resolved = self._cache.get(cache_key)
+        if resolved is None:
+            resolved = _resolve(pending, sources)
+            if len(self._cache) < _MAX_CACHE:
+                self._cache[cache_key] = resolved
+        return merged.combine(resolved)
 
 
 def _add_rule(sheet: Sheet, prelude: str, body: str) -> None:
@@ -827,8 +1056,9 @@ def _add_rule(sheet: Sheet, prelude: str, body: str) -> None:
     if not prelude or prelude.startswith("@") or "{" in body:
         return
     declarations, _ = parse_declarations(body)
-    style = evaluate(declarations)
-    if style == Style():
+    plain, custom, deferred = _split(declarations)
+    style = _evaluate(plain)
+    if style == Style() and not custom and not deferred:
         return
     for raw in prelude.split(","):
         match = _SIMPLE_SELECTOR.fullmatch(normalize(raw))
@@ -836,13 +1066,13 @@ def _add_rule(sheet: Sheet, prelude: str, body: str) -> None:
             continue
         tag, kind, name = match.groups()
         if kind is None:
-            sheet.add(("t", str(tag)), style)
+            sheet.add(("t", str(tag)), style, custom, deferred)
         elif kind == "#":
-            sheet.add(("i", name), style)
+            sheet.add(("i", name), style, custom, deferred)
         elif tag:
-            sheet.add(("tc", f"{tag}.{name}"), style)
+            sheet.add(("tc", f"{tag}.{name}"), style, custom, deferred)
         else:
-            sheet.add(("c", name), style)
+            sheet.add(("c", name), style, custom, deferred)
 
 
 def parse_stylesheet(css: str) -> Sheet:
@@ -880,6 +1110,7 @@ def parse_stylesheet(css: str) -> Sheet:
 __all__ = [
     "Color",
     "ColorValue",
+    "Declarations",
     "Flag",
     "Props",
     "Sheet",

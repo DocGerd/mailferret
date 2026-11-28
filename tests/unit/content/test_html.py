@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from mailferret.content import html as html_module
@@ -225,6 +225,46 @@ HIDDEN_VECTORS = {
     "font_shorthand_calc_zero": '<span style="font:calc(0px) a">{c}</span>',
     "font_shorthand_unknown_function": '<span style="font:round(1px) a">{c}</span>',
     "visibility_unknown_function": '<span style="visibility:round(1px)">{c}</span>',
+    "var_undefined_fallback": '<span style="font-size:var(--undefined, 0px)">{c}</span>',
+    "var_declared_zero": '<span style="--z:0px;font-size:var(--z)">{c}</span>',
+    "var_unresolved_size": '<span style="font-size:var(--x)">{c}</span>',
+    "var_unresolved_opacity": '<span style="opacity:var(--o)">{c}</span>',
+    "var_unresolved_visibility": '<span style="visibility:var(--v)">{c}</span>',
+    "var_unresolved_offset": '<span style="position:absolute;left:var(--x)">{c}</span>',
+    "var_unresolved_display": '<span style="display:var(--d)">{c}</span>',
+    "env_opacity": '<span style="opacity:env(x)">{c}</span>',
+    "env_size_with_fallback": '<span style="font-size:env(x, 13px)">{c}</span>',
+    "var_cycle": '<span style="--a:var(--b);--b:var(--a);font-size:var(--a)">{c}</span>',
+    "var_zero_opacity": '<span style="--o:0;opacity:var(--o)">{c}</span>',
+    "var_offscreen": '<span style="--l:-9999px;position:absolute;left:var(--l)">{c}</span>',
+    "var_hidden_visibility": '<span style="--v:hidden;visibility:var(--v)">{c}</span>',
+    "var_clipped_empty_box": ('<div style="overflow:hidden;--h:0;height:var(--h)">{c}</div>'),
+    "var_sheet_declares_inline_reads": (
+        "<style>.a{{--z:0px}}</style><span class=a style='font-size:var(--z)'>{c}</span>"
+    ),
+    "var_sheet_reads_inline_declares": (
+        "<style>.a{{font-size:var(--z)}}</style><span class=a style='--z:0px'>{c}</span>"
+    ),
+    "var_sheet_declares_sheet_reads": (
+        "<style>.a{{--z:0px}}.b{{font-size:var(--z)}}</style><span class='a b'>{c}</span>"
+    ),
+    "var_two_style_elements": (
+        "<style>.a{{--z:0px}}</style><style>.a{{font-size:var(--z)}}</style>"
+        "<span class=a>{c}</span>"
+    ),
+    "clip_and_zero_box_from_two_rules": (
+        "<style>.a{{overflow:hidden}}.b{{height:0}}</style><div class='a b'>{c}</div>"
+    ),
+    "var_important_beats_inline": (
+        "<style>.a{{--z:0px !important}}</style>"
+        "<span class=a style='--z:13px;font-size:var(--z)'>{c}</span>"
+    ),
+    "var_inline_overrides_sheet_into_zero": (
+        "<style>.a{{--z:13px;font-size:var(--z)}}</style><span class=a style='--z:0px'>{c}</span>"
+    ),
+    "var_order_is_unknown_hiding_wins": (
+        '<span style="--z:13px;font-size:var(--z);font-size:0">{c}</span>'
+    ),
     "size_calc_zero": '<span style="font-size:calc(0px)">{c}</span>',
     "size_min": '<span style="font-size:min(0px,12px)">{c}</span>',
     "size_min_unknown": '<span style="font-size:min(0px,var(--x))">{c}</span>',
@@ -369,17 +409,25 @@ def test_hidden_vector_is_removed(name: str) -> None:
         '<span style="font-size:1ex">{c}</span>',
         '<span style="font-size:calc(12px)">{c}</span>',
         '<span style="font-size:clamp(14px,2vw,18px)">{c}</span>',
+        '<span style="font-size:calc(min(0px, 1%) * -1)">{c}</span>',
+        '<span style="--s:13px;font-size:var(--s)">{c}</span>',
+        '<span style="font-size:var(--u, 13px)">{c}</span>',
+        '<span style="--o:1;opacity:var(--o)">{c}</span>',
+        '<span style="opacity:var(--u, 0.5)">{c}</span>',
+        '<span style="--d:block;display:var(--d)">{c}</span>',
+        '<span style="--l:0;position:absolute;left:var(--l)">{c}</span>',
+        '<span style="--v:visible;visibility:var(--v)">{c}</span>',
+        '<div style="font-size:0"><b style="--s:13px;font-size:var(--s)">{c}</b></div>',
+        "<style>.a{{--s:13px}}</style>"
+        '<div style="font-size:0"><b class=a style="font-size:var(--s)">{c}</b></div>',
+        "<style>.a{{font-size:var(--s)}}</style>"
+        '<div style="font-size:0"><b class=a style="--s:13px">{c}</b></div>',
         '<span style="font-size:calc(1em+2px)">{c}</span>',
-        '<span style="font-size:var(--s)">{c}</span>',
         '<span style="font-size:-webkit-calc(12px)">{c}</span>',
         '<span style="font:calc(12px) a">{c}</span>',
         '<span style="font:clamp(14px,2vw,18px) Arial">{c}</span>',
-        '<span style="visibility:var(--v)">{c}</span>',
-        '<span style="opacity:var(--o)">{c}</span>',
         '<span style="opacity:calc(50%)">{c}</span>',
         '<span style="opacity:calc(0.5)">{c}</span>',
-        '<span style="position:absolute;left:var(--x)">{c}</span>',
-        '<span style="font-size:calc(min(0px, var(--x)) * -1)">{c}</span>',
         '<span style="font-size:max(12px,0px)">{c}</span>',
         '<span style="font-size:clamp(10px,1em,20px)">{c}</span>',
         '<span style="font-size:calc(1em + 2px)">{c}</span>',
@@ -972,6 +1020,59 @@ def test_fuzz_unknown_function_in_a_hiding_property_fails_closed(
     assert NOTE_HIDDEN in result.notes
 
 
+# How a size is written: (template, custom property declarations, whether it can resolve)
+_VARIABLE_READS = [
+    ("var(--z)", "--z:{v};", True),
+    ("var(--u, {v})", "", True),
+    ("var(--z, {v})", "--z:{v};", True),
+    ("var(--a)", "--a:var(--z);--z:{v};", True),
+    ("var(--u)", "", False),
+    ("var(--z)", "--y:{v};", False),
+    ("env(x)", "", False),
+    ("env(x, {v})", "", False),
+    ("var(--a)", "--a:var(--a);", False),
+    ("var(--z)", "--z:var(--z, {v});", False),
+]
+
+
+@FUZZ
+@given(_size_values, st.sampled_from(_VARIABLE_READS), st.booleans(), st.booleans())
+def test_fuzz_variable_reads_follow_the_allowlist_or_fail_closed(
+    value: str, read: tuple[str, str, bool], tiny_parent: bool, sheet: bool
+) -> None:
+    template, custom, resolves = read
+    depth = 0
+    for char in value:  # an unclosed parenthesis swallows the rest of the block, as in browsers
+        depth = depth + (char == "(") - (char == ")")
+        assume(depth >= 0)
+    assume(depth == 0)
+    declarations = custom.replace("{v}", value) + "font-size:" + template.replace("{v}", value)
+    if sheet:
+        child = f"<style>b{{{declarations}}}</style><b>{CANARY}</b>"
+    else:
+        child = f'<b style="{declarations}">{CANARY}</b>'
+    html = f'<div style="font-size:0">{child}</div>' if tiny_parent else child
+    shown = html_to_text(html).text == CANARY
+    wide = value in ("initial", "inherit", "unset", "revert") and "{v}" in custom
+    if not resolves or wide:
+        assert not shown
+    elif tiny_parent:
+        assert shown == _oracle_size_clears(value)
+
+
+@FUZZ
+@given(
+    st.sampled_from(["opacity", "visibility", "font-size", "font", "left", "display", "height"]),
+    st.sampled_from(["var(--u)", "env(x)", "env(x, 1)", "var(--a)", "calc(var(--u) + 1px)"]),
+)
+def test_fuzz_unresolvable_variables_hide_in_every_hiding_property(prop: str, value: str) -> None:
+    extra = "overflow:hidden;" if prop == "height" else ""
+    css = f"{extra}--a:var(--a);{prop}:{value}" + (" a" if prop == "font" else "")
+    result = html_to_text(f'<p>a</p><span style="{css}">{CANARY}</span>')
+    assert result.text == "a"
+    assert NOTE_HIDDEN in result.notes
+
+
 @FUZZ
 @given(st.text(max_size=300))
 def test_fuzz_plain_body_stripping(text: str) -> None:
@@ -1121,3 +1222,15 @@ def test_variation_selectors_are_stripped() -> None:
     assert strip_invisible(f"{heart}{vs16} ok") == (f"{heart}{vs16} ok", False)
     assert strip_invisible(f" {vs16}x")[0] == " x"
     assert strip_format(f"a{hidden}b") == (f"a{hidden}b", False)
+
+
+def test_variable_resolution_stays_fast_on_many_elements() -> None:
+    chain = "".join(f"--a{i}:var(--a{i + 1}) var(--a{i + 1});" for i in range(8))
+    sheet = f"<style>.a{{{chain}--a8:13px;font-size:var(--a0)}}</style>"
+    body = "".join(f"<b class=a style='--q:{i}px;font-size:var(--q)'>x</b>" for i in range(5000))
+    started = time.monotonic()
+    result = html_to_text(sheet + body + "<i class=a>y</i>")
+    assert time.monotonic() - started < 3.0
+    assert "y" not in result.text  # the chain is too deep to resolve: hidden
+    assert result.text.startswith("x")
+    assert NOTE_HIDDEN in result.notes
