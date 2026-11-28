@@ -125,9 +125,10 @@ class Limits(BaseModel):
             problem = violation(key, getattr(self, key))
             if problem:
                 raise ValueError(problem)
-        if self.max_response_line_bytes <= self.max_line_bytes + LINE_OVERHEAD_BYTES:
+        if self.max_response_line_bytes < self.max_line_bytes + FETCH_LINE_ALLOWANCE_BYTES:
             raise ValueError(
-                "max_response_line_bytes must exceed max_line_bytes plus one line's overhead"
+                "max_response_line_bytes must hold one line and one fetched message's lines "
+                "(max_line_bytes plus the per-message allowance)"
             )
         return self
 
