@@ -5,6 +5,7 @@ The wire is compared with the allowlist, not with the guard's own log.
 
 from __future__ import annotations
 
+import re
 import sys
 import traceback
 from typing import Any
@@ -20,13 +21,69 @@ from mailferret.imap import (
     SessionError,
     fetch_caps,
 )
-from mailferret.imap.grammar import ALLOWED_VERBS
 from mailferret.imap.transport import _Client
 from mailferret.limits import Limits
 from tests.support.imap_fake import FakeImapServer
 from tests.unit.imap.conftest import Opener
 
 OK = "{tag} OK done\r\n"
+
+# A§6, written out here on purpose and never imported from the guard, so widening the guard's
+# lists cannot make this test pass.
+A6_VERBS = frozenset(
+    {
+        "CAPABILITY",
+        "NOOP",
+        "LOGOUT",
+        "STARTTLS",
+        "LOGIN",
+        "AUTHENTICATE",
+        "ID",
+        "NAMESPACE",
+        "LIST",
+        "LSUB",
+        "STATUS",
+        "EXAMINE",
+        "CLOSE",
+        "UNSELECT",
+        "SEARCH",
+        "FETCH",
+        "SORT",
+        "THREAD",
+    }
+)
+A6_UID_VERBS = frozenset({"SEARCH", "FETCH", "SORT", "THREAD"})
+A6_FETCH_ITEMS = frozenset(
+    {"UID", "FLAGS", "INTERNALDATE", "RFC822.SIZE", "ENVELOPE", "BODYSTRUCTURE", "RFC822.HEADER"}
+)
+_ITEM_TOKEN = re.compile(r"BODY\.PEEK\[[^\]]*\](?:<\d+\.\d+>)?|[A-Za-z0-9.]+(?:\[[^\]]*\])?")
+
+
+def fetch_items_allowed(line: str) -> bool:
+    """Every item after ``FETCH <set>`` is an A§6 item or a ``BODY.PEEK[...]`` with a partial."""
+    items = re.split(r"\bFETCH [0-9*:,]+ ", line, maxsplit=1)[-1]
+    tokens = _ITEM_TOKEN.findall(items.strip("()"))
+    return bool(tokens) and all(t in A6_FETCH_ITEMS or t.startswith("BODY.PEEK[") for t in tokens)
+
+
+def verb_allowed(verb: str, sub: str | None) -> bool:
+    return verb in A6_VERBS if sub is None else verb == "UID" and sub in A6_UID_VERBS
+
+
+@pytest.mark.parametrize(
+    ("line", "allowed"),
+    [
+        ("A1 UID FETCH 1 (UID FLAGS BODY.PEEK[HEADER.FIELDS (FROM TO)] BODYSTRUCTURE)", True),
+        ("A1 FETCH 1:* BODY.PEEK[1.2.MIME]<0.100>", True),
+        ("A1 UID FETCH 1 RFC822.TEXT", False),
+        ("A1 UID FETCH 1 (UID RFC822.TEXT)", False),
+        ("A1 UID FETCH 1 RFC822", False),
+        ("A1 UID FETCH 1 BODY[]", False),
+        ("A1 UID FETCH 1 (FLAGS BODY[TEXT])", False),
+    ],
+)
+def test_the_wire_checker_itself_denies_what_a6_denies(line: str, allowed: bool) -> None:
+    assert fetch_items_allowed(line) is allowed
 
 
 def _script(server: FakeImapServer) -> None:
@@ -68,10 +125,11 @@ def test_wire_survey_every_session_method_stays_on_the_allowlist(
     session.logout()
     verbs = _verbs(server)
     assert "EXAMINE" in verbs
-    allowed = {v for v in ALLOWED_VERBS if v != "UID"} | {f"UID {v}" for v in ALLOWED_VERBS}
-    assert set(verbs) <= allowed
+    assert all(verb_allowed(c.verb, c.sub) for c in server.commands)
     assert "SELECT" not in verbs
-    assert not any("BODY[" in line or "RFC822 " in line for line in server.wire)
+    fetches = [c.line for c in server.commands if "FETCH" in (c.verb, c.sub)]
+    assert fetches
+    assert all(fetch_items_allowed(line) for line in fetches)
     assert any("BODY.PEEK[HEADER.FIELDS (FROM TO)]" in line for line in server.wire)
 
 
