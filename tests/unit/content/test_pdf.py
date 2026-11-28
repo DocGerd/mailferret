@@ -11,6 +11,7 @@ import stat
 import sys
 import threading
 import time
+import typing
 from pathlib import Path
 
 import pytest
@@ -24,13 +25,14 @@ from mailferret.content.mime import PartInfo
 from mailferret.content.pdf_host import extract_pdf, parse_result, run_bounded, worker_argv
 from mailferret.content.pdf_worker import (
     PAGE_ENTRY_FACTOR,
+    PAGE_TREE_DEPTH,
     PAGE_TREE_FACTOR,
     WorkerLimits,
     extract,
     hardened_overrides,
     hardening_gaps,
 )
-from mailferret.limits import MIB, Limits
+from mailferret.limits import CEILINGS, MIB, Limits
 from tests.fixtures import generators
 
 LIMITS = Limits()
@@ -39,7 +41,8 @@ PY = sys.executable
 
 
 def kinds(result: pdf_host.PdfText) -> list[tuple[str, str | None]]:
-    return [(n.kind, n.limit) for n in result.notes]
+    """Notes, without the platform-dependent memory-cap note (asserted on its own)."""
+    return [(n.kind, n.limit) for n in result.notes if n.kind != "memory_cap_unavailable"]
 
 
 def python(code: str) -> list[str]:
@@ -50,9 +53,7 @@ def python(code: str) -> list[str]:
 
 
 def applied(limits: Limits = LIMITS) -> dict[str, object]:
-    return hardened_overrides(
-        Configuration(), stream_bytes=limits.pdf_stream_bytes, pages=limits.max_pdf_pages
-    )
+    return hardened_overrides(Configuration(), stream_bytes=limits.pdf_stream_bytes)
 
 
 def test_no_integer_field_exceeds_the_stream_cap() -> None:
@@ -66,21 +67,42 @@ def test_no_integer_field_exceeds_the_stream_cap() -> None:
                 assert value <= STREAM, field.name
 
 
-def test_every_program_field_is_none_and_jbig2dec_is_one() -> None:
-    programs = {f.name for f in dataclasses.fields(Configuration) if "binary" in f.name}
-    assert "jbig2dec_binary" in programs
-    with apply_configuration(**applied()):
-        config = get_configuration()
-        for name in programs:
-            assert getattr(config, name) is None
+def program_fields() -> list[str]:
+    hints = typing.get_type_hints(Configuration)
+    return [
+        f.name
+        for f in dataclasses.fields(Configuration)
+        if str in typing.get_args(hints[f.name]) and type(None) in typing.get_args(hints[f.name])
+    ]
 
 
-def test_page_tree_fields_derive_from_the_page_limit() -> None:
-    small = Limits(max_pdf_pages=5)
-    overrides = applied(small)
-    assert overrides["page_tree_maximum_entries"] == PAGE_TREE_FACTOR * 5
-    assert overrides["page_tree_maximum_page_entries"] == PAGE_TREE_FACTOR * PAGE_ENTRY_FACTOR * 5
-    assert overrides["page_tree_maximum_depth"] == 5
+def test_every_program_field_is_overridden_to_none() -> None:
+    names = program_fields()
+    assert "jbig2dec_binary" in names
+    for name in names:
+        configured = dataclasses.replace(Configuration(), **{name: "/x/prog"})
+        overrides = hardened_overrides(configured, stream_bytes=STREAM)
+        with apply_configuration(configured, **overrides):
+            assert getattr(get_configuration(), name) is None, name
+
+
+def test_page_tree_fields_derive_from_the_l09_ceiling_and_a_fixed_depth() -> None:
+    overrides = applied(Limits(max_pdf_pages=1))
+    tree = PAGE_TREE_FACTOR * CEILINGS["max_pdf_pages"]
+    assert overrides["page_tree_maximum_entries"] == tree
+    assert overrides["page_tree_maximum_page_entries"] == tree * PAGE_ENTRY_FACTOR
+    assert overrides["page_tree_maximum_depth"] == PAGE_TREE_DEPTH
+
+
+@pytest.mark.parametrize("pages", [1, 2])
+def test_a_lowered_page_limit_still_reads_ordinary_documents(pages: int) -> None:
+    small = Limits(max_pdf_pages=pages)
+    flat = extract_pdf(generators.plain_pdf(pages=25), small)
+    assert flat.text is not None and flat.text.count("Hello PDF") == pages
+    assert kinds(flat) == [("limit_exceeded", "L-09")]
+    nested = extract_pdf(generators.nested_page_tree_pdf(pages=5, depth=3), small)
+    assert nested.text is not None and nested.text.count("Hello PDF") == pages
+    assert kinds(nested) == [("limit_exceeded", "L-09")]
 
 
 def test_reader_constructor_limits_stay_at_pypdf_defaults() -> None:
@@ -148,7 +170,7 @@ def test_configuration_is_applied_in_the_parsing_thread() -> None:
 def test_plain_pdf_text() -> None:
     result = extract_pdf(generators.plain_pdf())
     assert result.text == "Hello PDF"
-    assert result.notes == ()
+    assert kinds(result) == []
     assert not result.truncated
 
 
@@ -545,3 +567,165 @@ def test_mutated_pdfs_never_raise_in_the_worker(edits: list[tuple[int, int]], cu
 def test_arbitrary_worker_output_never_raises_in_the_host(raw: bytes) -> None:
     result = parse_result(raw, LIMITS)
     assert isinstance(result, pdf_host.PdfText)
+
+
+# --- review follow-ups -----------------------------------------------------------------------
+
+
+def test_memory_error_in_a_page_maps_to_the_l10_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pypdf import PageObject
+
+    def hog_page(self: object, *args: object, **kwargs: object) -> str:
+        raise MemoryError
+
+    monkeypatch.setattr(PageObject, "extract_text", hog_page)
+    body = json.loads(extract(generators.plain_pdf(pages=3), worker_limits()))
+    assert body["notes"] == [["limit_exceeded", "L-10"]]
+    assert body["text"] == ""
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads RLIMIT_AS back")
+def test_the_real_worker_applies_the_memory_limit_to_itself() -> None:
+    memory = 400 * MIB
+    argv = worker_argv(Limits(pdf_worker_memory_bytes=memory))[4:]
+    code = (
+        "import resource, sys\n"
+        "from mailferret.content import pdf_worker\n"
+        f"pdf_worker.main({argv!r})\n"
+        "sys.stdout.write('\\n%d' % resource.getrlimit(resource.RLIMIT_AS)[0])\n"
+    )
+    result = run_bounded(
+        python(code),
+        generators.plain_pdf(),
+        deadline=30,
+        memory_bytes=4096 * MIB,
+        stdout_cap=65536,
+    )
+    payload, _, limit = result.stdout.rpartition(b"\n")
+    assert int(limit) == memory
+    assert json.loads(payload)["notes"] == []
+
+
+def test_missing_memory_cap_is_visible_as_a_note() -> None:
+    body = json.loads(extract(generators.plain_pdf(), worker_limits(), memory_capped=False))
+    assert body["notes"] == [["memory_cap_unavailable", None]]
+    assert body["text"] == "Hello PDF"
+    result = extract_pdf(generators.plain_pdf())
+    present = any(n.kind == "memory_cap_unavailable" for n in result.notes)
+    assert present == (sys.platform == "darwin")
+
+
+def test_a_failed_job_object_is_noted_by_the_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = b'{"v":1,"text":"ok","truncated":false,"notes":[]}'
+    fake = pdf_host.RunResult("exited", 0, body, job_failed=True)
+    monkeypatch.setattr(pdf_host, "run_bounded", lambda *a, **k: fake)
+    result = extract_pdf(b"%PDF-")
+    assert result.text == "ok"
+    assert [n.kind for n in result.notes] == ["memory_cap_unavailable"]
+
+
+class _FakeProc:
+    def __init__(self) -> None:
+        self.killed = False
+        self.stdin = self.stdout = self.stderr = None
+        self.pid = 0
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+def test_job_object_failures_are_reported_and_never_leave_the_worker_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proc = _FakeProc()
+    monkeypatch.setattr(pdf_host.MemoryJob, "create", classmethod(lambda cls, n: None))
+    assert pdf_host._attach_job(proc, 1) == (None, True)  # type: ignore[arg-type]
+
+    def explode(cls: object, memory: int) -> None:
+        raise OSError("job")
+
+    monkeypatch.setattr(pdf_host.MemoryJob, "create", classmethod(explode))
+    monkeypatch.setattr(pdf_host.os, "killpg", lambda *a: None, raising=False)
+    with pytest.raises(OSError, match="job"):
+        pdf_host._attach_job(proc, 1)  # type: ignore[arg-type]
+    assert proc.killed
+
+
+@pytest.mark.skipif(not hasattr(os, "waitid"), reason="needs waitid")
+def test_exit_is_detected_without_reaping_the_leader() -> None:
+    import subprocess
+
+    proc = subprocess.Popen([PY, "-I", "-c", "pass"])  # noqa: S603
+    try:
+        deadline = time.monotonic() + 20
+        while not pdf_host._has_exited(proc):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert proc.returncode is None  # still unreaped: its process group id is still ours
+    finally:
+        proc.wait()
+
+
+def _alive(pid: int) -> bool:
+    import subprocess
+
+    if sys.platform == "win32":
+        out = subprocess.run(  # noqa: S603
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout
+        return str(pid) in out
+    out = subprocess.run(  # noqa: S603
+        ["ps", "-o", "stat=", "-p", str(pid)],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    return bool(out) and not out.startswith("Z")
+
+
+def _wait_dead(pid: int) -> bool:
+    end = time.monotonic() + 10
+    while time.monotonic() < end:
+        if not _alive(pid):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+@pytest.mark.parametrize("worker_exits", [False, True], ids=["hangs", "exits_leaving_child"])
+def test_descendants_of_the_worker_are_killed(tmp_path: Path, worker_exits: bool) -> None:
+    pidfile = tmp_path / "child.pid"
+    code = (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(120)'],"
+        " stdout=sys.stdout)\n"
+        f"open({str(pidfile)!r}, 'w').write(str(child.pid))\n"
+        + ("" if worker_exits else "time.sleep(120)\n")
+    )
+    started = time.monotonic()
+    result = run_bounded(python(code), b"", deadline=4, memory_bytes=4096 * MIB, stdout_cap=1024)
+    assert time.monotonic() - started < 15
+    assert pidfile.exists(), "the worker never started its child"
+    pid = int(pidfile.read_text())
+    try:
+        assert result.status == "timeout"
+        assert _wait_dead(pid), "grandchild survived the deadline"
+    finally:
+        if _alive(pid) and sys.platform != "win32":
+            os.kill(pid, 9)
+
+
+def test_cf_controls_are_stripped_from_every_extractor_and_noted() -> None:
+    raw = generators.format_control_pdf()
+    assert "‮" in (extract_pdf(raw).text or ""), "control: the PDF yields Cf characters"
+    result = extract_text(part("application/pdf"), raw)
+    assert result.text == "x"
+    assert [(n.kind, n.part) for n in result.notes] == [("format_stripped", "2")]
+    plain = extract_text(part("text/plain"), "a‮b​c".encode())
+    assert plain.text == "abc"
+    assert [n.kind for n in plain.notes] == ["format_stripped"]
+    clean = extract_text(part("text/plain"), b"abc")
+    assert clean.notes == ()

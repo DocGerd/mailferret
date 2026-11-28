@@ -16,12 +16,14 @@ from collections.abc import Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Final
 
 from mailferret.content.truncate import truncate_chars
+from mailferret.limits import CEILINGS
 
 if TYPE_CHECKING:
     from pypdf import Configuration
 
 PAGE_TREE_FACTOR: Final = 20
 PAGE_ENTRY_FACTOR: Final = 16
+PAGE_TREE_DEPTH: Final = 32
 RESULT_VERSION: Final = 1
 _OPTIONS: Final = ("pages", "chars", "stream-bytes", "memory", "input-bytes")
 
@@ -52,10 +54,12 @@ def _is_program(hint: Any) -> bool:
     return str in args and type(None) in args
 
 
-def hardened_overrides(
-    configuration: Configuration, *, stream_bytes: int, pages: int
-) -> dict[str, Any]:
-    """The ``Configuration`` fields to change, found at runtime so a new field is covered."""
+def hardened_overrides(configuration: Configuration, *, stream_bytes: int) -> dict[str, Any]:
+    """The ``Configuration`` fields to change, found at runtime so a new field is covered.
+
+    The page-tree bounds derive from the L-09 ceiling, not the user's lowered value, so a lowered
+    ``max_pdf_pages`` still reads an ordinary document's first pages.
+    """
     hints = _hints()
     out: dict[str, Any] = {}
     for field in dataclasses.fields(configuration):
@@ -65,12 +69,12 @@ def hardened_overrides(
             out[field.name] = stream_bytes
         elif _is_program(hint):
             out[field.name] = None
-    tree = PAGE_TREE_FACTOR * pages
+    tree = PAGE_TREE_FACTOR * CEILINGS["max_pdf_pages"]
     out["page_tree_maximum_entries"] = min(configuration.page_tree_maximum_entries, tree)
     out["page_tree_maximum_page_entries"] = min(
         configuration.page_tree_maximum_page_entries, tree * PAGE_ENTRY_FACTOR
     )
-    out["page_tree_maximum_depth"] = min(configuration.page_tree_maximum_depth, pages)
+    out["page_tree_maximum_depth"] = min(configuration.page_tree_maximum_depth, PAGE_TREE_DEPTH)
     return out
 
 
@@ -127,6 +131,8 @@ def _pages(reader: Any, limits: WorkerLimits, out: _Result) -> Iterator[str]:
     pages = reader.pages
     try:
         count = len(pages)
+    except MemoryError:
+        raise
     except LimitReachedError:
         out.note("limit_exceeded", "L-09")
         return
@@ -136,6 +142,8 @@ def _pages(reader: Any, limits: WorkerLimits, out: _Result) -> Iterator[str]:
     for index in range(min(count, limits.pages)):
         try:
             page = pages[index]
+        except MemoryError:
+            raise
         except LimitReachedError:
             out.note("limit_exceeded", "L-09")
             return
@@ -144,6 +152,8 @@ def _pages(reader: Any, limits: WorkerLimits, out: _Result) -> Iterator[str]:
             return
         try:
             yield page.extract_text()
+        except MemoryError:
+            raise
         except LimitReachedError:
             out.note("limit_exceeded", "L-10")
         except Exception:  # per-page fault isolation
@@ -176,15 +186,15 @@ def _collect(data: bytes, limits: WorkerLimits, out: _Result) -> None:
         out.note("limit_exceeded", "L-03")
 
 
-def extract(data: bytes, limits: WorkerLimits) -> bytes:
+def extract(data: bytes, limits: WorkerLimits, *, memory_capped: bool = True) -> bytes:
     """Parse ``data`` with the hardened configuration applied in this thread; return the JSON."""
     from pypdf import Configuration, apply_configuration
     from pypdf.errors import LimitReachedError, PyPdfError
 
     out = _Result()
-    overrides = hardened_overrides(
-        Configuration(), stream_bytes=limits.stream_bytes, pages=limits.pages
-    )
+    if not memory_capped:
+        out.note("memory_cap_unavailable")
+    overrides = hardened_overrides(Configuration(), stream_bytes=limits.stream_bytes)
     try:
         with apply_configuration(**overrides):
             _collect(data, limits, out)
@@ -218,7 +228,7 @@ def main(argv: Sequence[str]) -> int:
     limits = parse_arguments(argv)
     if limits is None:
         return 2
-    apply_memory_limit(limits.memory)
+    capped = apply_memory_limit(limits.memory) or sys.platform == "win32"  # Windows: host job
     try:
         data = sys.stdin.buffer.read(limits.input_bytes + 1)
     except OSError:
@@ -228,7 +238,7 @@ def main(argv: Sequence[str]) -> int:
         result.failed("limit_exceeded", "L-08")
         payload = result.encode()
     else:
-        payload = extract(data, limits)
+        payload = extract(data, limits, memory_capped=capped)
     sys.stdout.buffer.write(payload)
     sys.stdout.buffer.flush()
     return 0

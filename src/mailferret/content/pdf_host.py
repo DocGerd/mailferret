@@ -23,7 +23,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, Final, Literal, get_args
+from typing import IO, Any, Final, Literal, get_args
 
 from mailferret.content.mime import Note, NoteKind
 from mailferret.content.pdf_job import MemoryJob
@@ -53,6 +53,7 @@ class RunResult:
     status: Status
     returncode: int | None
     stdout: bytes = field(default=b"", repr=False)
+    job_failed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,14 +138,50 @@ def _spawn(argv: Sequence[str]) -> subprocess.Popen[bytes]:
     )
 
 
-def _kill(proc: subprocess.Popen[bytes], job: MemoryJob | None) -> None:
+def _kill(proc: subprocess.Popen[bytes], job: MemoryJob | None, *, group: bool = True) -> None:
+    """Kill the worker and its descendants; ``group`` is False once the leader is reaped."""
     if job is not None:
         job.terminate()
-    elif sys.platform != "win32":
+    elif sys.platform != "win32" and group:
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(proc.pid, signal.SIGKILL)
     with contextlib.suppress(OSError):
         proc.kill()
+
+
+def _has_exited(proc: subprocess.Popen[bytes]) -> bool:
+    """Detect exit without reaping where possible, so ``killpg`` never meets a recycled group."""
+    waitid: Any = getattr(os, "waitid", None)
+    if waitid is None:
+        return proc.poll() is not None
+    flags = os.WEXITED | os.WNOHANG | os.WNOWAIT  # type: ignore[attr-defined,unused-ignore]
+    try:
+        return waitid(os.P_PID, proc.pid, flags) is not None  # type: ignore[attr-defined,unused-ignore]
+    except ChildProcessError:
+        return True
+
+
+def _close_pipes(proc: subprocess.Popen[bytes]) -> None:
+    for pipe in (proc.stdin, proc.stdout, proc.stderr):
+        if pipe is not None:
+            with contextlib.suppress(OSError):
+                pipe.close()
+
+
+def _attach_job(proc: subprocess.Popen[bytes], memory_bytes: int) -> tuple[MemoryJob | None, bool]:
+    """The job object holding ``proc``, and whether it could not be set up (then no memory cap)."""
+    try:
+        job = MemoryJob.create(memory_bytes)
+        if job is None:
+            return None, True
+        if not job.assign(int(getattr(proc, "_handle", 0))):
+            job.close()
+            return None, True
+        return job, False
+    except BaseException:
+        _kill(proc, None)
+        _close_pipes(proc)
+        raise
 
 
 def worker_argv(limits: Limits) -> list[str]:
@@ -173,14 +210,13 @@ def run_bounded(
     end = time.monotonic() + deadline
     proc = _spawn(argv)
     job: MemoryJob | None = None
+    job_failed = False
     if sys.platform == "win32":
-        job = MemoryJob.create(memory_bytes)
-        if job is not None and not job.assign(int(getattr(proc, "_handle", 0))):
-            job.close()
-            job = None
+        job, job_failed = _attach_job(proc, memory_bytes)
     stdin, stdout, stderr = proc.stdin, proc.stdout, proc.stderr
     if stdin is None or stdout is None or stderr is None:
         _kill(proc, job)
+        _close_pipes(proc)
         raise OSError("missing pipe")
     out = _Sink(stdout, stdout_cap)
     err = _Sink(stderr, None)
@@ -189,7 +225,7 @@ def run_bounded(
     threading.Thread(target=_feed, args=(stdin, data), daemon=True).start()
 
     status: Status = "exited"
-    while proc.poll() is None:
+    while not _has_exited(proc):
         if out.breach.is_set():
             status = "output_exceeded"
             break
@@ -197,15 +233,18 @@ def run_bounded(
             status = "timeout"
             break
         time.sleep(_POLL)
+    # The leader is unreaped here wherever ``waitid`` exists, so its group id is still ours.
+    can_kill_group = hasattr(os, "waitid")
     if status != "exited":
         _kill(proc, job)
     else:
         out.join(max(0.0, end - time.monotonic()))
         if not out.done.is_set():
             status = "timeout"
-            _kill(proc, job)
         elif out.breach.is_set():
             status = "output_exceeded"
+        if status != "exited" or can_kill_group:
+            _kill(proc, job, group=can_kill_group)
     try:
         returncode: int | None = proc.wait(timeout=_JOIN_GRACE)
     except subprocess.TimeoutExpired:
@@ -219,8 +258,8 @@ def run_bounded(
             with contextlib.suppress(OSError):
                 pipe.close()
     if status != "exited":
-        return RunResult(status, returncode)
-    return RunResult(status, returncode, bytes(out.data))
+        return RunResult(status, returncode, job_failed=job_failed)
+    return RunResult(status, returncode, bytes(out.data), job_failed)
 
 
 def _failed(kind: NoteKind, limit: str | None = None) -> PdfText:
@@ -261,6 +300,22 @@ def parse_result(stdout: bytes, limits: Limits) -> PdfText:
     return PdfText(kept if kept or not notes else None, truncated or capped.truncated, notes)
 
 
+def _interpret(result: RunResult, limits: Limits) -> PdfText:
+    if result.status == "timeout":
+        return _failed("limit_exceeded", "L-10")
+    if result.status == "output_exceeded":
+        return _failed("limit_exceeded", "L-03")
+    if result.returncode != 0:
+        return _failed("part_failed")
+    return parse_result(result.stdout, limits)
+
+
+def _noting(text: PdfText, job_failed: bool) -> PdfText:
+    if not job_failed:
+        return text
+    return PdfText(text.text, text.truncated, (*text.notes, Note("memory_cap_unavailable")))
+
+
 def extract_pdf(
     data: bytes, limits: Limits = _DEFAULT_LIMITS, *, argv: Sequence[str] | None = None
 ) -> PdfText:
@@ -275,12 +330,6 @@ def extract_pdf(
             memory_bytes=limits.pdf_worker_memory_bytes,
             stdout_cap=_MAX_CHAR_BYTES * limits.max_body_chars + _OVERHEAD,
         )
-        if result.status == "timeout":
-            return _failed("limit_exceeded", "L-10")
-        if result.status == "output_exceeded":
-            return _failed("limit_exceeded", "L-03")
-        if result.returncode != 0:
-            return _failed("part_failed")
-        return parse_result(result.stdout, limits)
+        return _noting(_interpret(result, limits), result.job_failed)
     except Exception:  # per-part fault isolation
         return _failed("part_failed")
